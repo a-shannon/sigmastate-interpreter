@@ -64,6 +64,7 @@ sealed trait MethodsContainer {
 
   private var _v5Methods: Seq[SMethod] = null
   private var _v6Methods: Seq[SMethod] = null
+  private var _v7Methods: Seq[SMethod] = null
 
   /** Returns all the methods of this type. */
   def methods: Seq[SMethod] = {
@@ -76,7 +77,12 @@ sealed trait MethodsContainer {
       ms
     }
 
-    if (VersionContext.current.isV3OrLaterErgoTreeVersion) {
+    if (VersionContext.current.isV4OrLaterErgoTreeVersion) {
+      if (_v7Methods == null) {
+        _v7Methods = calc()
+      }
+      _v7Methods
+    } else if (VersionContext.current.isV3OrLaterErgoTreeVersion) {
       if (_v6Methods == null) {
         _v6Methods = calc()
       }
@@ -91,6 +97,7 @@ sealed trait MethodsContainer {
 
   private var _v5MethodsMap: Map[Byte, Map[Byte, SMethod]] = null
   private var _v6MethodsMap: Map[Byte, Map[Byte, SMethod]] = null
+  private var _v7MethodsMap: Map[Byte, Map[Byte, SMethod]] = null
 
   private def _methodsMap: Map[Byte, Map[Byte, SMethod]] = {
     def calc() = {
@@ -98,7 +105,12 @@ sealed trait MethodsContainer {
         .groupBy(_.objType.typeId)
         .map { case (typeId, ms) => (typeId -> ms.map(m => m.methodId -> m).toMap) }
     }
-    if (VersionContext.current.isV3OrLaterErgoTreeVersion) {
+    if (VersionContext.current.isV4OrLaterErgoTreeVersion) {
+      if (_v7MethodsMap == null) {
+        _v7MethodsMap = calc()
+      }
+      _v7MethodsMap
+    } else if (VersionContext.current.isV3OrLaterErgoTreeVersion) {
       if (_v6MethodsMap == null) {
         _v6MethodsMap = calc()
       }
@@ -699,6 +711,7 @@ case object SSigmaPropMethods extends MonoTypeMethods {
   val MaxSizeInBytes: Long = SigmaConstants.MaxSigmaPropSizeInBytes.value
 
   val PropBytes = "propBytes"
+  val PropBytesV2 = "propBytesV2"
   val IsProven = "isProven"
   lazy val PropBytesMethod = SMethod(
     this, PropBytes, SFunc(this.ownerType, SByteArray), 1, SigmaPropBytes.costKind)
@@ -708,9 +721,32 @@ case object SSigmaPropMethods extends MonoTypeMethods {
       .withInfo(// available only at frontend of ErgoScript
         "Verify that sigma proposition is proven.")
 
-  protected override def getMethods() = super.getMethods() ++ Seq(
+  // Source name is "propBytesV2" so `pk.propBytes` keeps resolving to methodId 1 on V0..V6
+  // contracts; the V7 overload picks up a distinct registry entry.
+  lazy val PropBytesMethodV2 = SMethod(
+    this, PropBytesV2, SFunc(Array(this.ownerType, SByte), SByteArray), 3, SigmaPropBytes.costKind)
+    .withIRInfo(MethodCallIrBuilder, javaMethodOf[SigmaProp, Byte]("propBytes"))
+    .withInfo(MethodCall,
+      "Serialized bytes of this sigma proposition as ErgoTree of the given version.",
+      ArgInfo("version", "ErgoTree version (0..7) to embed in the output header."))
+
+  private lazy val commonMethods = super.getMethods() ++ Seq(
     PropBytesMethod, IsProvenMethod
   )
+
+  private lazy val v6Methods = commonMethods
+
+  private lazy val v7Methods = commonMethods ++ Seq(
+    PropBytesMethodV2
+  )
+
+  protected override def getMethods(): Seq[SMethod] = {
+    if (VersionContext.current.isV4OrLaterErgoTreeVersion) {
+      v7Methods
+    } else {
+      v6Methods
+    }
+  }
 }
 
 /** Any other type is implicitly subtype of this type. */
