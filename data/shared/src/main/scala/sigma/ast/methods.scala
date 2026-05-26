@@ -155,7 +155,10 @@ sealed trait MethodsContainer {
 
 }
 object MethodsContainer {
-  private val methodsV5 = Array(
+  // Visible inside `sigma.ast` so MethodsContainerSpec can iterate every container
+  // and force reflection lookups across all script versions. Keeps a single source
+  // of truth so a new container automatically participates in the cross-platform check.
+  private[ast] val methodsV5 = Array(
     SByteMethods,
     SShortMethods,
     SIntMethods,
@@ -178,7 +181,7 @@ object MethodsContainer {
     SAnyMethods
   )
 
-  private val methodsV6 = methodsV5 ++ Seq(SUnsignedBigIntMethods)
+  private[ast] val methodsV6 = methodsV5 ++ Seq(SUnsignedBigIntMethods)
 
   private val containersV5 = new SparseArrayContainer[MethodsContainer](methodsV5.map(m => (m.typeId, m)))
 
