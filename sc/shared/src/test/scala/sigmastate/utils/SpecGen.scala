@@ -70,13 +70,18 @@ trait SpecGen {
         .groupBy(_.docInfo.flatMap(i => i.opDesc.map(_.opCode)))
     //      .map { case p @ (k, xs) => p.ensuring({ k.isEmpty || xs.length == 1}, p) }
 
+    // Multiple predefined functions may legitimately share an opCode (e.g. the overloads
+    // `executeFromSelfReg` / `executeFromSelfRegWithDefault`), so we no longer require a
+    // single func per opCode. When several funcs share an opCode the most complete overload
+    // (most arguments, ties broken by name) is used for the docs. This is deterministic and
+    // selects the richer signature, e.g. the `WithDefault` variant whose `default` argument
+    // is referenced by DeserializeRegisterSerializer.
     val funcsByOpCode = funcs
         .groupBy(_.docInfo.opDesc.map(_.opCode))
-        .ensuring(g => g.forall{ case (k, xs) => xs.length <= 1})
 
     val table = ops.map { case (opCode, opDesc) =>
       val methodOpt = methodsByOpCode.get(Some(opCode)).map(_.head)
-      val funcOpt = funcsByOpCode.get(Some(opCode)).map(_.head)
+      val funcOpt = funcsByOpCode.get(Some(opCode)).map(_.maxBy(f => (f.declaration.args.length, f.name)))
       (opCode, opDesc, methodOpt, funcOpt)
     }
     val rowsWithInfo =
