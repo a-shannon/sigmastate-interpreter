@@ -157,7 +157,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars.updated(3.toByte, ByteArrayConstant(wrongProof))) shouldBe false
   }
 
-  property("BtcTxCheck validates a Bitcoin tx Merkle proof under relay header") {
+  property("BtcTxCheck validates an odd-count Bitcoin tx Merkle proof under relay header") {
     val fixture = txCheckFixture()
 
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe true
@@ -396,6 +396,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val tx1 = fromHex("a7c2b4a2cc940f9f541905048fe8352bd158dab18d15221fab7ee2187bd3cb5e")
     val tx2 = fromHex("1d74396699ae0effcd67fd5d031b780ff56c336bfc5d2d015d21db687d732764")
     val tx3Id = fromHex("d8c9d6a13a7fb8236833b1e93d298f4626deeb78b2f1814aa9a779961c08ce39")
+    // This block has three transactions, so the first Merkle level pairs the
+    // proven transaction with its own duplicate per Bitcoin's odd-count rule.
+    // That edge case is covered here, without claiming full mutated-tree defense.
     val merkleProof = Array(
       (1.toByte +: tx3Id.reverse).toColl,
       (0.toByte +: doubleSha256(tx1.reverse ++ tx2.reverse)).toColl)
