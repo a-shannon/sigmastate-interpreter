@@ -106,6 +106,22 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
     vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
   }
 
+  property("rsBTC vault rejects header id absent from relay best chain") {
+    val fixture = vaultFixture()
+    val contextVars = fixture.contextVars
+      .updated(2.toByte, ByteArrayConstant(fixture.missingHeaderId))
+      .updated(3.toByte, ByteArrayConstant(fixture.missingHeaderProof))
+
+    vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
+  }
+
+  property("rsBTC vault rejects data input without relay NFT") {
+    val fixture = vaultFixture()
+    val wrongRelayFixture = fixture.copy(relayDataInput = fixture.wrongRelayDataInput)
+
+    vaultProves(wrongRelayFixture, Sha256.hash(fixture.output1Script), output1Amount) shouldBe false
+  }
+
   property("rsBTC vault rejects insufficient relay confirmations") {
     val fixture = vaultFixture(tipHeight = bitcoinHeaderHeight + 5)
 
@@ -119,6 +135,14 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
     val contextVars = fixture.contextVars.updated(1.toByte, ByteArrayConstant(txBytes))
 
     vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
+  }
+
+  property("rsBTC vault rejects 64-byte transaction bytes even with matching Merkle root") {
+    val txBytes = ambiguous64ByteTx()
+    val script = txBytes.slice(56, 60)
+    val fixture = singleTransactionVaultFixture(txBytes)
+
+    vaultProves(fixture, Sha256.hash(script), minSatoshis = 1000L) shouldBe false
   }
 
   private def compileV6(script: String): ErgoTree =
@@ -178,7 +202,10 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
       merkleProof: Array[Coll[Byte]],
       txBytes: Array[Byte],
       output1Script: Array[Byte],
-      output2Script: Array[Byte])
+      output2Script: Array[Byte],
+      missingHeaderId: Array[Byte],
+      missingHeaderProof: Array[Byte],
+      wrongRelayDataInput: ErgoBox)
 
   private def vaultFixture(tipHeight: Int = bitcoinHeaderHeight + 6): VaultFixture = {
     val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
@@ -186,6 +213,8 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
     val headerAndHeight = header ++ longToBytes(bitcoinHeaderHeight.toLong)
     val bestChain = MutableAvl(Seq(headerId -> headerAndHeight), AvlTreeFlags.InsertOnly)
     val headerProof = bestChain.lookupProof(headerId)
+    val missingHeaderId = Array.fill(32)(1.toByte)
+    val missingHeaderProof = bestChain.lookupProof(missingHeaderId)
 
     val txBytes = fromHex("0100000001eba8353ac2e5503f15548975108013246457ed83d331db760f0595b8bd7c54cb000000008c4930460221008c64f29882d9a59cbb070d75b4cdca56c04b523b0af37a0ffecee24e31cb2814022100b183ab317ad217f4a6f4e610c6138e5c2d7681d40f46201f268a5a90c1c07afa0141040b362c040204c13f6e1ec78b60978bdd76d851d4a1612cd9e82ead5177694f8f37fa4e8c78579876bbaf8a561772f320d3125f36cd1f1c5e9eb3f8bc08b626d2ffffffff0280e9fd97000000001976a914f0630fd41ff0722cf29de4db609f06a4c17fad2d88ac002a7515000000001976a9141dea9e37227b8d7a6296849fc76e00e8f5a6674e88ac00000000")
     val txId = doubleSha256(txBytes)
@@ -201,25 +230,56 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
 
     val relayDataInput = relayBox(bestChain.tree, tipHeight, headerId,
       transactionId = ModifierId @@ Base16.encode(txId))
+    val wrongRelayDataInput = relayBox(bestChain.tree, tipHeight, headerId,
+      transactionId = ModifierId @@ Base16.encode(txId),
+      relayTokenId = Digest32Coll @@ Array.fill(32)(1.toByte).toColl)
     val contextVars: Map[Byte, EvaluatedValue[_ <: SType]] = Map(
       1.toByte -> ByteArrayConstant(txBytes),
       2.toByte -> ByteArrayConstant(headerId),
       3.toByte -> ByteArrayConstant(headerProof),
       4.toByte -> CollectionConstant[SCollection[SByte.type]](merkleProof.toColl, SCollection(SByte)))
 
-    VaultFixture(relayDataInput, contextVars, merkleProof, txBytes, output1Script, output2Script)
+    VaultFixture(relayDataInput, contextVars, merkleProof, txBytes, output1Script, output2Script,
+      missingHeaderId, missingHeaderProof, wrongRelayDataInput)
+  }
+
+  private def singleTransactionVaultFixture(txBytes: Array[Byte], tipHeight: Int = bitcoinHeaderHeight + 6): VaultFixture = {
+    val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
+    val txId = doubleSha256(txBytes)
+    Array.copy(txId, 0, header, 36, 32)
+    val headerId = doubleSha256(header)
+    val headerAndHeight = header ++ longToBytes(bitcoinHeaderHeight.toLong)
+    val bestChain = MutableAvl(Seq(headerId -> headerAndHeight), AvlTreeFlags.InsertOnly)
+    val headerProof = bestChain.lookupProof(headerId)
+    val missingHeaderId = Array.fill(32)(1.toByte)
+    val missingHeaderProof = bestChain.lookupProof(missingHeaderId)
+    val merkleProof = Array.empty[Coll[Byte]]
+    val relayDataInput = relayBox(bestChain.tree, tipHeight, headerId,
+      transactionId = ModifierId @@ Base16.encode(txId))
+    val wrongRelayDataInput = relayBox(bestChain.tree, tipHeight, headerId,
+      transactionId = ModifierId @@ Base16.encode(txId),
+      relayTokenId = Digest32Coll @@ Array.fill(32)(1.toByte).toColl)
+    val contextVars: Map[Byte, EvaluatedValue[_ <: SType]] = Map(
+      1.toByte -> ByteArrayConstant(txBytes),
+      2.toByte -> ByteArrayConstant(headerId),
+      3.toByte -> ByteArrayConstant(headerProof),
+      4.toByte -> CollectionConstant[SCollection[SByte.type]](merkleProof.toColl, SCollection(SByte)))
+
+    VaultFixture(relayDataInput, contextVars, merkleProof, txBytes, Array.emptyByteArray, Array.emptyByteArray,
+      missingHeaderId, missingHeaderProof, wrongRelayDataInput)
   }
 
   private def relayBox(
       bestChain: CAvlTree,
       tipHeight: Int,
       tipId: Array[Byte],
-      transactionId: ModifierId): ErgoBox =
+      transactionId: ModifierId,
+      relayTokenId: Digest32Coll = relayToken): ErgoBox =
     testBox(
       relayBoxValue,
       TrueTree,
       creationHeight = 0,
-      additionalTokens = ArraySeq((relayToken, 1L): Token),
+      additionalTokens = ArraySeq((relayTokenId, 1L): Token),
       additionalRegisters = Map(
         R4 -> AvlTreeConstant(bestChain),
         R5 -> AvlTreeConstant(bestChain),
@@ -252,6 +312,25 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
 
   private def fromHex(hex: String): Array[Byte] =
     Base16.decode(hex).get
+
+  private def ambiguous64ByteTx(): Array[Byte] = {
+    val tx = Array.fill(64)(0.toByte)
+    tx(4) = 1.toByte
+    tx(41) = 0.toByte
+    tx(42) = 0xff.toByte
+    tx(43) = 0xff.toByte
+    tx(44) = 0xff.toByte
+    tx(45) = 0xff.toByte
+    tx(46) = 1.toByte
+    val amount = ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(1000L).array()
+    Array.copy(amount, 0, tx, 47, 8)
+    tx(55) = 4.toByte
+    tx(56) = 1.toByte
+    tx(57) = 2.toByte
+    tx(58) = 3.toByte
+    tx(59) = 4.toByte
+    tx
+  }
 
   private val vaultScript: String =
     """{
@@ -354,7 +433,9 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
       |    }
       |  }
       |
-      |  val sizeOk = txBytes.size >= 61
+      |  // Exclude 64-byte txBytes so an internal Merkle child pair cannot be
+      |  // reinterpreted as a transaction if parser bounds are widened later.
+      |  val sizeOk = txBytes.size >= 61 && txBytes.size != 64
       |  val inputCount = readByte(4)
       |  val inputCountOk = inputCount == 1 || inputCount == 2
       |
