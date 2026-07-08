@@ -106,6 +106,26 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
     vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
   }
 
+  property("rsBTC vault rejects Merkle proof with invalid direction flag") {
+    val fixture = vaultFixture()
+    val proof = fixture.merkleProof.map(_.toArray)
+    proof(0)(0) = 2.toByte
+    val wrongProof = CollectionConstant[SCollection[SByte.type]](proof.map(_.toColl).toColl, SCollection(SByte))
+    val contextVars = fixture.contextVars.updated(4.toByte, wrongProof)
+
+    vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
+  }
+
+  property("rsBTC vault rejects Merkle proof level with extra bytes") {
+    val fixture = vaultFixture()
+    val proof = fixture.merkleProof.map(_.toArray)
+    proof(0) = proof(0) :+ 0.toByte
+    val wrongProof = CollectionConstant[SCollection[SByte.type]](proof.map(_.toColl).toColl, SCollection(SByte))
+    val contextVars = fixture.contextVars.updated(4.toByte, wrongProof)
+
+    vaultProves(fixture, Sha256.hash(fixture.output1Script), output1Amount, contextVars) shouldBe false
+  }
+
   property("rsBTC vault rejects header id absent from relay best chain") {
     val fixture = vaultFixture()
     val contextVars = fixture.contextVars
@@ -126,6 +146,18 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
     val fixture = vaultFixture(tipHeight = bitcoinHeaderHeight + 5)
 
     vaultProves(fixture, scriptHash = Sha256.hash(fixture.output1Script), minSatoshis = output1Amount) shouldBe false
+  }
+
+  property("rsBTC vault rejects expected script hash with wrong length") {
+    val fixture = vaultFixture()
+
+    vaultProves(fixture, scriptHash = Sha256.hash(fixture.output1Script).drop(1), minSatoshis = output1Amount) shouldBe false
+  }
+
+  property("rsBTC vault rejects zero minimum satoshis") {
+    val fixture = vaultFixture()
+
+    vaultProves(fixture, scriptHash = Sha256.hash(fixture.output1Script), minSatoshis = 0L) shouldBe false
   }
 
   property("rsBTC vault rejects transaction bytes not matching Merkle inclusion") {
@@ -365,6 +397,9 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
       |
       |  val merkleRootBytes = headerAndHeight.slice(36, 68)
       |  val merkleProof = getVar[Coll[Coll[Byte]]](4).get
+      |  val proofShapeOk = merkleProof.forall({ (proofElem: Coll[Byte]) =>
+      |    proofElem.size == 33 && (proofElem(0) == 0 || proofElem(0) == 1)
+      |  })
       |
       |  def computeLevel(prevHash: Coll[Byte], proofElem: Coll[Byte]) = {
       |    val elemHash = proofElem.slice(1, 33)
@@ -376,11 +411,12 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
       |  }
       |
       |  val computedMerkleRoot = merkleProof.fold(txId, computeLevel)
-      |  val properProof = computedMerkleRoot == merkleRootBytes
+      |  val properProof = proofShapeOk && computedMerkleRoot == merkleRootBytes
       |
       |  val expectedScriptHash = SELF.R4[Coll[Byte]].get
       |  val minSatoshis = SELF.R5[Long].get
-      |  val minSatoshisOk = minSatoshis >= 0L && minSatoshis <= maxBtcSatoshis
+      |  val expectedScriptHashOk = expectedScriptHash.size == 32
+      |  val minSatoshisOk = minSatoshis > 0L && minSatoshis <= maxBtcSatoshis
       |
       |  def readByte(pos: Int): Int = {
       |    val signed = txBytes(pos).toInt
@@ -493,6 +529,7 @@ class BitcoinRsBtcVaultSpecification extends CompilerTestingCommons with Compile
       |    properRelay &&
       |    enoughConfs &&
       |    properProof &&
+      |    expectedScriptHashOk &&
       |    sizeOk &&
       |    minSatoshisOk &&
       |    inputCountOk &&
