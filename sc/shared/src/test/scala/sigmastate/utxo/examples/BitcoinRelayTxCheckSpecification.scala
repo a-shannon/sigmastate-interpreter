@@ -172,6 +172,24 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(4.toByte, wrongProof)) shouldBe false
   }
 
+  property("BtcTxCheck rejects Merkle proof with invalid direction flag") {
+    val fixture = txCheckFixture()
+    val proof = fixture.merkleProof.map(_.toArray)
+    proof(0)(0) = 2.toByte
+    val wrongProof = CollectionConstant[SCollection[SByte.type]](proof.map(_.toColl).toColl, SCollection(SByte))
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(4.toByte, wrongProof)) shouldBe false
+  }
+
+  property("BtcTxCheck rejects Merkle proof level with extra bytes") {
+    val fixture = txCheckFixture()
+    val proof = fixture.merkleProof.map(_.toArray)
+    proof(0) = proof(0) :+ 0.toByte
+    val wrongProof = CollectionConstant[SCollection[SByte.type]](proof.map(_.toColl).toColl, SCollection(SByte))
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(4.toByte, wrongProof)) shouldBe false
+  }
+
   property("BtcTxCheck rejects insufficient confirmations") {
     val fixture = txCheckFixture(tipHeight = bitcoinHeaderHeight + 5)
 
@@ -820,6 +838,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val merkleRootBytes = headerAndHeight.slice(36, 68)
       |
       |    val merkleProof = getVar[Coll[Coll[Byte]]](4).get
+      |    val proofShapeOk = merkleProof.forall({ (proofElem: Coll[Byte]) =>
+      |        proofElem.size == 33 && (proofElem(0) == 0 || proofElem(0) == 1)
+      |    })
       |
       |    def computeLevel(prevHash: Coll[Byte], proofElem: Coll[Byte]) = {
       |        val elemHash = proofElem.slice(1,33)
@@ -832,7 +853,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |    val computedMerkleRoot = merkleProof.fold(txId, computeLevel)
       |
-      |    val properProof = computedMerkleRoot == merkleRootBytes
+      |    val properProof = proofShapeOk && computedMerkleRoot == merkleRootBytes
       |
       |    // This predicate authenticates relay-confirmed inclusion; spending policy is supplied by the composing contract.
       |
