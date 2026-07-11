@@ -32,6 +32,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
 
   private val relayNftId = Array.fill(32)(0.toByte)
   private val relayToken = Digest32Coll @@ relayNftId.toColl
+  private val canonicalRelayTokens = ArraySeq((relayToken, 1L): Token)
   private val relayBoxValue = 100000000L
   private val bitcoinHeaderHeight = 93500
   private val mainnetHeader566092Hex =
@@ -47,7 +48,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private val forkHeaderHex =
     "01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313"
   private val expectedHeader566093Target = BigInt("4440088742263677654396177039706714734771352055402463232")
-  private val expectedHeader566093Work = BigInt("26078778141331078011537")
+  private val expectedHeader566093Work = BigInt("26078778141331078011536")
   private val bitcoinPowLimit = BigInt("26959535291011309493156476344723991336010898738574164086137773096960")
   private val targetTimespanSeconds = 1209600L
 
@@ -84,6 +85,31 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val fixture = retargetAppendFixture()
 
     relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe true
+  }
+
+  property("BtcRelay rejects a successor guarded by a different proposition") {
+    val fixture = bestChainAppendFixture(outputErgoTree = btcTxCheckTree)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects a relay NFT quantity other than one") {
+    val fixture = bestChainAppendFixture(relayTokens = ArraySeq((relayToken, 2L): Token))
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects a different relay NFT id") {
+    val wrongRelayToken = Digest32Coll @@ Array.fill(32)(1.toByte).toColl
+    val fixture = bestChainAppendFixture(relayTokens = ArraySeq((wrongRelayToken, 1L): Token))
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed best-chain AVL key length") {
+    val fixture = bestChainAppendFixture(outputBestChainKeyLength = 31)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
   }
 
   property("BtcRelay rejects header hash above compact target") {
@@ -157,7 +183,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars.updated(3.toByte, ByteArrayConstant(wrongProof))) shouldBe false
   }
 
-  property("BtcTxCheck validates an odd-count Bitcoin tx Merkle proof under relay header") {
+  property("BtcTxCheck validates an odd-count Bitcoin tx Merkle proof with seven confirmations") {
     val fixture = txCheckFixture()
 
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe true
@@ -190,8 +216,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(4.toByte, wrongProof)) shouldBe false
   }
 
-  property("BtcTxCheck rejects insufficient confirmations") {
+  property("BtcTxCheck rejects six conventional confirmations") {
     val fixture = txCheckFixture(tipHeight = bitcoinHeaderHeight + 5)
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcTxCheck rejects a relay NFT quantity other than one") {
+    val fixture = txCheckFixture(relayTokens = ArraySeq((relayToken, 2L): Token))
 
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
   }
@@ -308,7 +340,10 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
 
   private def bestChainAppendFixture(
       newHeaderBytes: Array[Byte] = fromHex(mainnetHeader566093Hex),
-      declaredBlockWork: Option[BigInteger] = None): RelayFixture = {
+      declaredBlockWork: Option[BigInteger] = None,
+      relayTokens: ArraySeq[Token] = canonicalRelayTokens,
+      outputErgoTree: ErgoTree = btcRelayTree,
+      outputBestChainKeyLength: Int = 32): RelayFixture = {
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
@@ -323,12 +358,15 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val allHeaders = MutableAvl(Seq(h1.id -> allHeadersRecord(h1, bestChain.tree.digest.toArray, h1.cumulativeWork)), AvlTreeFlags.InsertOnly)
     val parentLookupProof = allHeaders.lookupProof(h1.id)
 
-    val input = relayBox(bestChain.tree, allHeaders.tree, h1.height, h1.id, h1.cumulativeWork)
+    val input = relayBox(bestChain.tree, allHeaders.tree, h1.height, h1.id, h1.cumulativeWork,
+      relayTokens = relayTokens)
     val bestChainBefore = bestChain.tree
     val bestInsertProof = bestChain.insertProof(h2.id, h2.headerAndHeight)
     val bestChainAfter = bestChain.tree
     val allHeadersInsertProof = allHeaders.insertProof(h2.id, allHeadersRecord(h2, bestChainAfter.digest.toArray, h2.cumulativeWork))
-    val output = relayCandidate(bestChainAfter, allHeaders.tree, h2.height, h2.id, h2.cumulativeWork)
+    val outputBestChain = CAvlTree(bestChainAfter.treeData.copy(keyLength = outputBestChainKeyLength))
+    val output = relayCandidate(outputBestChain, allHeaders.tree, h2.height, h2.id, h2.cumulativeWork,
+      relayTokens = relayTokens, ergoTree = outputErgoTree)
 
     RelayFixture(input, output, relayContextVars(h2.bytes, bestInsertProof, parentLookupProof, bestChainBefore, bestInsertProof,
       allHeadersInsertProof, h2.cumulativeWork))
@@ -401,7 +439,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       allHeadersInsertProof, next.cumulativeWork, retargetAnchorId = Some(anchor.id), retargetAnchorProof = Some(retargetAnchorProof)))
   }
 
-  private def txCheckFixture(tipHeight: Int = bitcoinHeaderHeight + 6): TxCheckFixture = {
+  private def txCheckFixture(
+      tipHeight: Int = bitcoinHeaderHeight + 6,
+      relayTokens: ArraySeq[Token] = canonicalRelayTokens): TxCheckFixture = {
     val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
     val headerId = fromHex("000000000003b8e6533b3f238ee00ff8dd68c3a2377a213f7a72c3ef0fe0c54b")
     val headerAndHeight = header ++ longToBytes(bitcoinHeaderHeight.toLong)
@@ -422,7 +462,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       (0.toByte +: doubleSha256(tx1.reverse ++ tx2.reverse)).toColl)
 
     val relayDataInput = relayBox(bestChain.tree, bestChain.tree, tipHeight, headerId, BigInteger.ZERO,
-      transactionId = ModifierId @@ Base16.encode(txId))
+      transactionId = ModifierId @@ Base16.encode(txId), relayTokens = relayTokens)
     val txCheckInput = testBox(
       relayBoxValue,
       btcTxCheckTree,
@@ -467,12 +507,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       tipHeight: Int,
       tipId: Array[Byte],
       tipWork: BigInteger,
-      transactionId: ModifierId = ErgoBox.allZerosModifierId): ErgoBox =
+      transactionId: ModifierId = ErgoBox.allZerosModifierId,
+      relayTokens: ArraySeq[Token] = canonicalRelayTokens,
+      ergoTree: ErgoTree = btcRelayTree): ErgoBox =
     testBox(
       relayBoxValue,
-      btcRelayTree,
+      ergoTree,
       creationHeight = 0,
-      additionalTokens = ArraySeq((relayToken, 1L): Token),
+      additionalTokens = relayTokens,
       additionalRegisters = Map(
         R4 -> AvlTreeConstant(bestChain),
         R5 -> AvlTreeConstant(allHeaders),
@@ -487,8 +529,11 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       allHeaders: CAvlTree,
       tipHeight: Int,
       tipId: Array[Byte],
-      tipWork: BigInteger): ErgoBoxCandidate =
-    relayBox(bestChain, allHeaders, tipHeight, tipId, tipWork).toCandidate
+      tipWork: BigInteger,
+      relayTokens: ArraySeq[Token] = canonicalRelayTokens,
+      ergoTree: ErgoTree = btcRelayTree): ErgoBoxCandidate =
+    relayBox(bestChain, allHeaders, tipHeight, tipId, tipWork,
+      relayTokens = relayTokens, ergoTree = ergoTree).toCandidate
 
   private def allHeadersRecord(header: HeaderFixture, chainDigest: Array[Byte], cumulativeWork: BigInteger): Array[Byte] =
     header.headerAndHeight ++ chainDigest ++ cumulativeWork.toByteArray
@@ -525,9 +570,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
 
   private def blockWorkFromHeader(headerBytes: Array[Byte]): BigInt = {
     val target = targetFromHeader(headerBytes)
-    val maxTarget = (BigInt(1) << 256) - 1
 
-    (maxTarget / (target + 1)) + 1
+    (BigInt(1) << 256) / (target + 1)
   }
 
   private def targetFromHeader(headerBytes: Array[Byte]): BigInt = {
@@ -610,6 +654,13 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val tipWork = SELF.R8[BigInt].get
       |
       |    val selfOut = OUTPUTS(0)
+      |    // Reference fixture relay NFT id. A deployed relay would substitute its real relay NFT.
+      |    val relayNftId = fromBase16("0000000000000000000000000000000000000000000000000000000000000000")
+      |    val relayTokens = SELF.tokens
+      |    val relayToken = if (relayTokens.size == 1) relayTokens(0) else (relayNftId, 0L)
+      |    val relayIdentityOk = relayTokens.size == 1 &&
+      |                          relayToken._1 == relayNftId &&
+      |                          relayToken._2 == 1L
       |
       |    def reverse4(bytes: Coll[Byte]): Coll[Byte] = {
       |        Coll(bytes(3), bytes(2), bytes(1), bytes(0))
@@ -669,7 +720,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val maxWorkNumerator = unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")
       |    val maxSignedWork = unsignedBigInt("57896044618658097711785492504343953926634992332820282019728792003956564819967")
       |    val workUnsigned = if (targetSanityOk) {
-      |        (maxWorkNumerator / (target.toUnsigned + unsignedBigInt("1"))) + unsignedBigInt("1")
+      |        val targetUnsigned = target.toUnsigned
+      |        ((maxWorkNumerator - targetUnsigned) / (targetUnsigned + unsignedBigInt("1"))) + unsignedBigInt("1")
       |    } else {
       |        unsignedBigInt("0")
       |    }
@@ -693,6 +745,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |        outBestChainTree.digest == outputDigest &&
       |        outBestChainTree.enabledOperations == bestChainDigest.enabledOperations &&
+      |        outBestChainTree.keyLength == bestChainDigest.keyLength &&
+      |        outBestChainTree.valueLengthOpt == bestChainDigest.valueLengthOpt &&
       |        selfOut.R6[Int].get == tipHeight + 1 &&
       |        selfOut.R7[Coll[Byte]].get == id &&
       |        selfOut.R8[BigInt].get == cumWork
@@ -757,8 +811,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |        val newAllHeadersDigestProvided = selfOut.R5[AvlTree].get
       |
       |        val allHeadersUpdateOk = parentChainProvided.digest == parentChainDigest &&
+      |                                    parentChainProvided.enabledOperations == bestChainDigest.enabledOperations &&
+      |                                    parentChainProvided.keyLength == bestChainDigest.keyLength &&
+      |                                    parentChainProvided.valueLengthOpt == bestChainDigest.valueLengthOpt &&
       |                                    cumWork == byteArrayToBigInt(cumWorkProvided) &&
       |                                    allHeadersDbUpdated == newAllHeadersDigestProvided &&
+      |                                    newAllHeadersDigestProvided.enabledOperations == allHeadersDigest.enabledOperations &&
+      |                                    newAllHeadersDigestProvided.keyLength == allHeadersDigest.keyLength &&
+      |                                    newAllHeadersDigestProvided.valueLengthOpt == allHeadersDigest.valueLengthOpt &&
       |                                    difficultyTransitionOk
       |
       |        if (cumWork > tipWork && prevBlockId != tipHash) {
@@ -768,6 +828,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |            val switchOk = outBestChainTree.digest == updDigest &&
       |                            outBestChainTree.enabledOperations == bestChainDigest.enabledOperations &&
+      |                            outBestChainTree.keyLength == bestChainDigest.keyLength &&
+      |                            outBestChainTree.valueLengthOpt == bestChainDigest.valueLengthOpt &&
       |                            selfOut.R6[Int].get == parentHeight + 1 &&
       |                            selfOut.R7[Coll[Byte]].get == id &&
       |                            selfOut.R8[BigInt].get == cumWork
@@ -781,6 +843,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |                val outBestChainTree = selfOut.R4[AvlTree].get
       |                outBestChainTree.digest == bestChainDigest.digest &&
       |                outBestChainTree.enabledOperations == bestChainDigest.enabledOperations &&
+      |                outBestChainTree.keyLength == bestChainDigest.keyLength &&
+      |                outBestChainTree.valueLengthOpt == bestChainDigest.valueLengthOpt &&
       |                selfOut.R6[Int].get == tipHeight &&
       |                selfOut.R7[Coll[Byte]].get == tipHash &&
       |                selfOut.R8[BigInt].get == tipWork
@@ -790,9 +854,12 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |        }
       |    }
       |
-      |    val selfPreservation = selfOut.value >= SELF.value && selfOut.tokens == SELF.tokens
+      |    val selfPreservation = selfOut.value >= SELF.value &&
+      |                           selfOut.propositionBytes == SELF.propositionBytes &&
+      |                           selfOut.tokens == SELF.tokens
       |
-      |    sigmaProp(validHeaderSize && validPow && workFitsSigned && selfPreservation && validTipUpdate && allHeadersDbUpdate)
+      |    sigmaProp(validHeaderSize && validPow && workFitsSigned && relayIdentityOk &&
+      |              selfPreservation && validTipUpdate && allHeadersDbUpdate)
       |}""".stripMargin
 
   private val btcTxCheckScript: String =
@@ -808,11 +875,16 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |    // Reference fixture relay NFT id. A deployed relay would substitute its real relay NFT.
       |    val relayNftId = fromBase16("0000000000000000000000000000000000000000000000000000000000000000")
-      |    val minConfs = 6 // minimum 6 confirmations required
+      |    // Six descendants after the containing header means seven confirmations including that header.
+      |    val minDescendants = 6
       |
       |    val relayDataInput = CONTEXT.dataInputs(0)
       |
-      |    val properRelay = relayDataInput.tokens(0)._1 == relayNftId
+      |    val relayTokens = relayDataInput.tokens
+      |    val relayToken = if (relayTokens.size == 1) relayTokens(0) else (relayNftId, 0L)
+      |    val properRelay = relayTokens.size == 1 &&
+      |                      relayToken._1 == relayNftId &&
+      |                      relayToken._2 == 1L
       |
       |    def doubleSha256(bytes: Coll[Byte]) = sha256(sha256(bytes))
       |
@@ -833,7 +905,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |    val tipHeight = relayDataInput.R6[Int].get
       |
-      |    val enoughConfs = (tipHeight - height) >= minConfs
+      |    val enoughConfs = (tipHeight - height) >= minDescendants
       |
       |    val merkleRootBytes = headerAndHeight.slice(36, 68)
       |
