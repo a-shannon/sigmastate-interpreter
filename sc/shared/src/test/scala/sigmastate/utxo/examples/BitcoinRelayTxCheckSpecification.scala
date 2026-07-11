@@ -112,6 +112,48 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
   }
 
+  property("BtcRelay rejects changed best-chain AVL value length") {
+    val fixture = bestChainAppendFixture(outputBestChainValueLengthOpt = Some(88))
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed best-chain AVL operation flags") {
+    val fixture = bestChainAppendFixture(outputBestChainFlags = AvlTreeFlags.AllOperationsAllowed)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed all-headers AVL key length") {
+    val fixture = bestChainAppendFixture(outputAllHeadersKeyLength = 31)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed all-headers AVL value length") {
+    val fixture = bestChainAppendFixture(outputAllHeadersValueLengthOpt = Some(128))
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed all-headers AVL operation flags") {
+    val fixture = bestChainAppendFixture(outputAllHeadersFlags = AvlTreeFlags.AllOperationsAllowed)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed parent-chain AVL operation flags") {
+    val fixture = bestChainAppendFixture(parentChainFlags = AvlTreeFlags.AllOperationsAllowed)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcRelay rejects changed best-chain AVL metadata on branch switch") {
+    val fixture = forkAppendFixture(bestChainWorkWins = true, outputBestChainKeyLength = 31)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
   property("BtcRelay rejects header hash above compact target") {
     val invalidHeader = invalidPowHeaderBytes()
     relayPowHitIsBelowTarget(invalidHeader) shouldBe false
@@ -343,7 +385,13 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       declaredBlockWork: Option[BigInteger] = None,
       relayTokens: ArraySeq[Token] = canonicalRelayTokens,
       outputErgoTree: ErgoTree = btcRelayTree,
-      outputBestChainKeyLength: Int = 32): RelayFixture = {
+      outputBestChainFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly,
+      outputBestChainKeyLength: Int = 32,
+      outputBestChainValueLengthOpt: Option[Int] = None,
+      outputAllHeadersFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly,
+      outputAllHeadersKeyLength: Int = 32,
+      outputAllHeadersValueLengthOpt: Option[Int] = None,
+      parentChainFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly): RelayFixture = {
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
@@ -364,15 +412,26 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val bestInsertProof = bestChain.insertProof(h2.id, h2.headerAndHeight)
     val bestChainAfter = bestChain.tree
     val allHeadersInsertProof = allHeaders.insertProof(h2.id, allHeadersRecord(h2, bestChainAfter.digest.toArray, h2.cumulativeWork))
-    val outputBestChain = CAvlTree(bestChainAfter.treeData.copy(keyLength = outputBestChainKeyLength))
-    val output = relayCandidate(outputBestChain, allHeaders.tree, h2.height, h2.id, h2.cumulativeWork,
+    val outputBestChain = CAvlTree(bestChainAfter.treeData.copy(
+      treeFlags = outputBestChainFlags,
+      keyLength = outputBestChainKeyLength,
+      valueLengthOpt = outputBestChainValueLengthOpt))
+    val outputAllHeaders = CAvlTree(allHeaders.tree.treeData.copy(
+      treeFlags = outputAllHeadersFlags,
+      keyLength = outputAllHeadersKeyLength,
+      valueLengthOpt = outputAllHeadersValueLengthOpt))
+    val parentChainProvided = CAvlTree(bestChainBefore.treeData.copy(treeFlags = parentChainFlags))
+    val output = relayCandidate(outputBestChain, outputAllHeaders, h2.height, h2.id, h2.cumulativeWork,
       relayTokens = relayTokens, ergoTree = outputErgoTree)
 
-    RelayFixture(input, output, relayContextVars(h2.bytes, bestInsertProof, parentLookupProof, bestChainBefore, bestInsertProof,
+    RelayFixture(input, output, relayContextVars(h2.bytes, bestInsertProof, parentLookupProof, parentChainProvided, bestInsertProof,
       allHeadersInsertProof, h2.cumulativeWork))
   }
 
-  private def forkAppendFixture(bestChainWorkWins: Boolean, forceSwitchOutput: Boolean = false): RelayFixture = {
+  private def forkAppendFixture(
+      bestChainWorkWins: Boolean,
+      forceSwitchOutput: Boolean = false,
+      outputBestChainKeyLength: Int = 32): RelayFixture = {
     val h0 = HeaderFixture(
       hex = forkHeaderHex,
       height = 566092,
@@ -397,9 +456,11 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val h1BestChainAfter = h1BestChain.tree
     val allHeadersInsertProof = allHeaders.insertProof(h2.id, allHeadersRecord(h2, h1BestChainAfter.digest.toArray, h2.cumulativeWork))
 
+    val selectedBestChain = if (bestChainWorkWins || forceSwitchOutput) h1BestChainAfter else h0BestChain.tree
+    val outputBestChain = CAvlTree(selectedBestChain.treeData.copy(keyLength = outputBestChainKeyLength))
     val output =
-      if (bestChainWorkWins || forceSwitchOutput) relayCandidate(h1BestChainAfter, allHeaders.tree, h2.height, h2.id, h2.cumulativeWork)
-      else relayCandidate(h0BestChain.tree, allHeaders.tree, h0.height, h0.id, h0.cumulativeWork)
+      if (bestChainWorkWins || forceSwitchOutput) relayCandidate(outputBestChain, allHeaders.tree, h2.height, h2.id, h2.cumulativeWork)
+      else relayCandidate(outputBestChain, allHeaders.tree, h0.height, h0.id, h0.cumulativeWork)
 
     RelayFixture(input, output, relayContextVars(h2.bytes, h1BestInsertProof, parentLookupProof, h1BestChainBefore,
       h1BestInsertProof, allHeadersInsertProof, h2.cumulativeWork))
@@ -654,7 +715,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val tipWork = SELF.R8[BigInt].get
       |
       |    val selfOut = OUTPUTS(0)
-      |    // Reference fixture relay NFT id. A deployed relay would substitute its real relay NFT.
+      |    // Reference fixture relay NFT id. A deployed relay substitutes its real relay NFT and
+      |    // initializes genesis under this proposition with exactly one unit of that token.
       |    val relayNftId = fromBase16("0000000000000000000000000000000000000000000000000000000000000000")
       |    val relayTokens = SELF.tokens
       |    val relayToken = if (relayTokens.size == 1) relayTokens(0) else (relayNftId, 0L)
@@ -882,6 +944,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |    val relayTokens = relayDataInput.tokens
       |    val relayToken = if (relayTokens.size == 1) relayTokens(0) else (relayNftId, 0L)
+      |    // Relay authenticity is inductive: correctly initialized genesis plus BtcRelay's
+      |    // proposition-and-token preservation keeps this singleton NFT under the relay script.
       |    val properRelay = relayTokens.size == 1 &&
       |                      relayToken._1 == relayNftId &&
       |                      relayToken._2 == 1L
