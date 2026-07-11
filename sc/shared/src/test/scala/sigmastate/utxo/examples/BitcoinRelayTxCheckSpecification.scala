@@ -916,6 +916,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |        }
       |    }
       |
+      |    // Preserve the exact token vector: extra successor tokens would invalidate
+      |    // BtcTxCheck's singleton relay-identity check and make the relay unusable as a data input.
       |    val selfPreservation = selfOut.value >= SELF.value &&
       |                           selfOut.propositionBytes == SELF.propositionBytes &&
       |                           selfOut.tokens == SELF.tokens
