@@ -39,6 +39,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     "00000020a82ff9c62e69a6cbed277b7f2a9ac9da3c7133a59a6305000000000000000000f6cd5708a6ba38d8501502b5b4e5b93627e8dcc9bd13991894c6e04ade262aa99582815c505b2e17479a751b"
   private val mainnetHeader566093Hex =
     "00000020b45e33a345ad08ad2902cdd4101632fcbec009694b0c2500000000000000000016c99a795d8e0105d86f361341c7858d223fac261718bd608052822c5b4ae3cfd782815c505b2e17a56bb90b"
+  // Bitcoin mainnet block 566094 (canonical hash 0000000000000000000c9ed898ad11d40b030b2e384879da8c70826b2e533b09).
+  // Added to form the real 566092 -> 566093 -> 566094 chain required by the pinned
+  // producer/consumer regression: transition 2 must decode the record transition 1 inserted.
+  // Same difficulty period as 566092/566093 (no retarget boundary).
+  private val mainnetHeader566094Hex =
+    "00000020eccfa71bfa8a562fb464d312396f3fe99ac1ed3d403923000000000000000000ceb1f9869ce11ae60d3d912a0e0aaf8ef79f1f0b3b813bab63a435ea718908b13e8a815c505b2e17454d01eb"
+  private val mainnetHeader566094CanonicalHash =
+    "0000000000000000000c9ed898ad11d40b030b2e384879da8c70826b2e533b09"
   private val mainnetHeader562464Hex =
     "00000020ae55d7640b738e1c16091cc73666526e7fa12af66c0419000000000000000000f7825fe0714275fe54521f66e898cf743ed43dd93f185cb628df995823e4ee2d7d58605c886f2e176d085a4c"
   private val mainnetHeader564479Hex =
@@ -51,6 +59,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private val expectedHeader566093Work = BigInt("26078778141331078011536")
   private val bitcoinPowLimit = BigInt("26959535291011309493156476344723991336010898738574164086137773096960")
   private val targetTimespanSeconds = 1209600L
+  // Seed cumulative work carried by the parent tip of the mainnet fixtures, shared so the pinned
+  // cumulative-work test and the fixtures that produce it cannot drift apart.
+  private val fixtureSeedWork = new BigInteger("100500500500")
 
   private lazy val btcRelayTree = compileV6(btcRelayScript)
   private lazy val btcTxCheckTree = compileV6(btcTxCheckScript)
@@ -205,11 +216,228 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
   }
 
-  property("BtcRelay rejects wrong cumulative work bytes") {
+  property("BtcRelay ignores a supplied cumulative work var") {
     val fixture = bestChainAppendFixture()
 
     relayProves(fixture.input, fixture.output,
-      fixture.contextVars.updated(7.toByte, ByteArrayConstant(BigInteger.ONE.toByteArray))) shouldBe false
+      fixture.contextVars.updated(7.toByte, ByteArrayConstant(BigInteger.ONE.toByteArray))) shouldBe true
+  }
+
+  property("cumulative work serialization uses minimal signed big-endian at the sign-byte boundary") {
+    new BigInteger("127").toByteArray shouldBe Array(0x7f.toByte)
+    new BigInteger("128").toByteArray shouldBe Array(0x00.toByte, 0x80.toByte)
+  }
+
+  property("V6 BigInt.toBytes and byteArrayToBigInt satisfy the sign-byte vectors in-interpreter") {
+    // The same vectors the JVM-level tests pin, asserted by the V6 interpreter itself: the relay
+    // record encoding depends on BigInt.toBytes agreeing with BigInteger.toByteArray, sign byte
+    // included, and on byteArrayToBigInt inverting it.
+    val tree = compileV6(bigIntBytesScript)
+    val box = testBox(relayBoxValue, tree, creationHeight = 0)
+    val tx = new ErgoLikeTransaction(
+      IndexedSeq(Input(box.id, ProverResult(Array.emptyByteArray, ContextExtension.empty))),
+      IndexedSeq.empty,
+      IndexedSeq(box.toCandidate))
+    val ctx = ErgoLikeContextTesting(
+      currentHeight = 0,
+      lastBlockUtxoRoot = sigma.data.AvlTreeData.dummy,
+      minerPubkey = ErgoLikeContextTesting.dummyPubkey,
+      boxesToSpend = IndexedSeq(box),
+      tx,
+      self = box,
+      activatedVersion = V6SoftForkVersion)
+
+    proveAndVerify(tree, ctx, Map.empty) shouldBe true
+  }
+
+  property("cumulative work of the mainnet fixture is pinned with its canonical bytes") {
+    val h2Work = fixtureSeedWork.add(blockWorkFromHeader(fromHex(mainnetHeader566093Hex)).bigInteger)
+    h2Work shouldBe new BigInteger("26078778141431578512036")
+    h2Work.signum shouldBe 1
+    val suffix = h2Work.toByteArray
+    suffix shouldBe fromHex("0585bbbfd457faf84aa4")
+    new BigInteger(suffix) shouldBe h2Work
+    suffix.length should (be >= 1 and be <= 32)
+  }
+
+  property("a canonical cumulative-work record written by one transition is decoded as the next transition's parent") {
+    val h2Bytes = fromHex(mainnetHeader566093Hex)
+    val h3Bytes = fromHex(mainnetHeader566094Hex)
+
+    // The added header certifies itself inside the suite: canonical hash, parent linkage to
+    // 566093, unchanged difficulty period, and valid proof of work.
+    Base16.encode(doubleSha256(h3Bytes).reverse) shouldBe mainnetHeader566094CanonicalHash
+    h3Bytes.slice(4, 36) shouldBe doubleSha256(h2Bytes)
+    h3Bytes.slice(72, 76) shouldBe h2Bytes.slice(72, 76)
+    relayPowHitIsBelowTarget(h3Bytes) shouldBe true
+
+    // 2^87 is exactly 0x80 followed by ten zero bytes, so its top magnitude byte is 0x80 and
+    // BigInteger.toByteArray is forced to prepend a 0x00 sign byte. h1's seed work is derived
+    // backwards from it, so h2's cumulative work still comes out of the real work calculation.
+    // Do not replace this with a rounder value whose top byte is below 0x80: the sign byte
+    // would vanish and the record encoding this test exists to pin would stop being exercised.
+    val h2CumWork = BigInteger.ONE.shiftLeft(87)
+    h2CumWork.signum shouldBe 1
+    val h1CumWork = h2CumWork.subtract(blockWorkFromHeader(h2Bytes).bigInteger)
+    h1CumWork.signum shouldBe 1
+
+    val h1 = HeaderFixture(hex = mainnetHeader566092Hex, height = 566092, cumulativeWork = h1CumWork)
+    val h2 = HeaderFixture(h2Bytes, h1.height + 1, h1.cumulativeWork.add(blockWorkFromHeader(h2Bytes).bigInteger))
+    h2.cumulativeWork shouldBe h2CumWork
+
+    val h2CumWorkBytes = h2CumWork.toByteArray
+    h2CumWorkBytes(0) shouldBe 0x00.toByte
+    (h2CumWorkBytes(1) & 0x80) shouldBe 0x80
+
+    // transition 1: append h2 onto tip h1, inserting h2's record into the all-headers tree
+    val bestChain1 = MutableAvl(Seq(h1.id -> h1.headerAndHeight), AvlTreeFlags.InsertOnly)
+    val h1Record = allHeadersRecord(h1, bestChain1.tree.digest.toArray, h1.cumulativeWork)
+    val allHeaders1 = MutableAvl(Seq(h1.id -> h1Record), AvlTreeFlags.InsertOnly)
+    val h1LookupProof = allHeaders1.lookupProof(h1.id)
+
+    val input1 = relayBox(bestChain1.tree, allHeaders1.tree, h1.height, h1.id, h1.cumulativeWork)
+    val bestChain1Before = bestChain1.tree
+    val bestInsertProof1 = bestChain1.insertProof(h2.id, h2.headerAndHeight)
+    val bestChain1After = bestChain1.tree
+    val h2Record = allHeadersRecord(h2, bestChain1After.digest.toArray, h2.cumulativeWork)
+    val allHeadersInsertProof1 = allHeaders1.insertProof(h2.id, h2Record)
+    val allHeaders1After = allHeaders1.tree
+    val output1 = relayCandidate(bestChain1After, allHeaders1After, h2.height, h2.id, h2.cumulativeWork)
+
+    relayProves(input1, output1, relayContextVars(h2.bytes, bestInsertProof1, h1LookupProof, bestChain1Before,
+      bestInsertProof1, allHeadersInsertProof1)) shouldBe true
+
+    // the committed record carries the canonical encoding, sign byte included: transition 1 can only
+    // succeed if the contract's inserted bytes match this independently constructed record (AVL digest equality).
+    h2Record.drop(121) shouldBe h2CumWorkBytes
+    h2Record.length shouldBe 121 + h2CumWorkBytes.length
+    h2Record.slice(0, 80) shouldBe h2.bytes
+    h2Record.slice(80, 88) shouldBe longToBytes(h2.height.toLong)
+    h2Record.slice(88, 121) shouldBe bestChain1After.digest.toArray
+    bestChain1After.digest.toArray.length shouldBe 33
+
+    // transition 2: replay both records into the parent state and append h3 onto tip h2
+    val h3 = HeaderFixture(h3Bytes, h2.height + 1, h2.cumulativeWork.add(blockWorkFromHeader(h3Bytes).bigInteger))
+    val bestChain2 = MutableAvl(Seq(h1.id -> h1.headerAndHeight, h2.id -> h2.headerAndHeight), AvlTreeFlags.InsertOnly)
+    val allHeaders2 = MutableAvl(Seq(h1.id -> h1Record, h2.id -> h2Record), AvlTreeFlags.InsertOnly)
+
+    // authenticated continuity: transition 2 starts from the exact state transition 1 committed to
+    allHeaders2.tree.digest.toArray shouldBe allHeaders1After.digest.toArray
+    bestChain2.tree.digest.toArray shouldBe bestChain1After.digest.toArray
+
+    val h2LookupProof = allHeaders2.lookupProof(h2.id)
+    val input2 = relayBox(bestChain2.tree, allHeaders2.tree, h2.height, h2.id, h2.cumulativeWork)
+    val bestChain2Before = bestChain2.tree
+    val bestInsertProof2 = bestChain2.insertProof(h3.id, h3.headerAndHeight)
+    val bestChain2After = bestChain2.tree
+    val allHeadersInsertProof2 = allHeaders2.insertProof(h3.id,
+      allHeadersRecord(h3, bestChain2After.digest.toArray, h3.cumulativeWork))
+    val output2 = relayCandidate(bestChain2After, allHeaders2.tree, h3.height, h3.id, h3.cumulativeWork)
+
+    relayProves(input2, output2, relayContextVars(h3.bytes, bestInsertProof2, h2LookupProof, bestChain2Before,
+      bestInsertProof2, allHeadersInsertProof2)) shouldBe true
+  }
+
+  property("a switch transition derives cumulative work from the decoded parent record, not the tip register") {
+    val h2Bytes = fromHex(mainnetHeader566093Hex)
+    val h3Bytes = fromHex(mainnetHeader566094Hex)
+
+    // Same sign-byte-crossing anchor as the chained producer/consumer test: 2^87 is 0x80 followed by
+    // ten zero bytes, so BigInteger.toByteArray must prepend a 0x00 sign byte. h1's work is derived
+    // backwards from it, so h2's cumulative work still comes out of the real work calculation.
+    val h2CumWork = BigInteger.ONE.shiftLeft(87)
+    val h2CumWorkBytes = h2CumWork.toByteArray
+    h2CumWorkBytes(0) shouldBe 0x00.toByte
+    (h2CumWorkBytes(1) & 0x80) shouldBe 0x80
+
+    val h1CumWork = h2CumWork.subtract(blockWorkFromHeader(h2Bytes).bigInteger)
+    h1CumWork.signum shouldBe 1
+    val h3CumWork = h2CumWork.add(blockWorkFromHeader(h3Bytes).bigInteger)
+
+    // The competing tip's cumulative work has to sit strictly inside (h2CumWork, h3CumWork): above
+    // h2's so appending h2 to the branch does not switch, below h3's so appending h3 does. That is
+    // what makes the tip register and the decoded parent work disagree at the switch. 10^22 is about
+    // 38% of one block's work here (~2.6 * 10^22), so it lands well inside the window rather than at
+    // an edge, and the assertions below fail loudly if either bound ever drifts past it.
+    val competingTipWork = h2CumWork.add(new BigInteger("10000000000000000000000"))
+    (h2CumWork.compareTo(competingTipWork) < 0) shouldBe true
+    (competingTipWork.compareTo(h3CumWork) < 0) shouldBe true
+
+    val h0 = HeaderFixture(hex = forkHeaderHex, height = 566092, cumulativeWork = competingTipWork)
+    val h1 = HeaderFixture(hex = mainnetHeader566092Hex, height = 566092, cumulativeWork = h1CumWork)
+    val h2 = HeaderFixture(h2Bytes, h1.height + 1, h1.cumulativeWork.add(blockWorkFromHeader(h2Bytes).bigInteger))
+    h2.cumulativeWork shouldBe h2CumWork
+    val h3 = HeaderFixture(h3Bytes, h2.height + 1, h2.cumulativeWork.add(blockWorkFromHeader(h3Bytes).bigInteger))
+    h3.cumulativeWork shouldBe h3CumWork
+
+    // transition 1: append h2 to the non-best branch. Its cumulative work loses to the competing
+    // tip, so the tip registers stay on h0 and only the all-headers tree grows.
+    val tipChain1 = MutableAvl(Seq(h0.id -> h0.headerAndHeight), AvlTreeFlags.InsertOnly)
+    val branchChain1 = MutableAvl(Seq(h1.id -> h1.headerAndHeight), AvlTreeFlags.InsertOnly)
+    val h1Record = allHeadersRecord(h1, branchChain1.tree.digest.toArray, h1.cumulativeWork)
+    val h0Record = allHeadersRecord(h0, tipChain1.tree.digest.toArray, h0.cumulativeWork)
+    val allHeaders1 = MutableAvl(Seq(h1.id -> h1Record, h0.id -> h0Record), AvlTreeFlags.InsertOnly)
+    val h1LookupProof = allHeaders1.lookupProof(h1.id)
+
+    val input1 = relayBox(tipChain1.tree, allHeaders1.tree, h0.height, h0.id, h0.cumulativeWork)
+    val branchChain1Before = branchChain1.tree
+    val branchInsertProof1 = branchChain1.insertProof(h2.id, h2.headerAndHeight)
+    val branchChain1After = branchChain1.tree
+    val h2Record = allHeadersRecord(h2, branchChain1After.digest.toArray, h2.cumulativeWork)
+    val allHeadersInsertProof1 = allHeaders1.insertProof(h2.id, h2Record)
+    val allHeaders1After = allHeaders1.tree
+    val output1 = relayCandidate(tipChain1.tree, allHeaders1After, h0.height, h0.id, h0.cumulativeWork)
+
+    // var 2 carries the branch insert proof as a placeholder: prevBlockId is h1, the tip is h0, so
+    // the contract takes the else-arm of validTipUpdate and never evaluates it.
+    relayProves(input1, output1, relayContextVars(h2.bytes, branchInsertProof1, h1LookupProof,
+      branchChain1Before, branchInsertProof1, allHeadersInsertProof1)) shouldBe true
+
+    h2Record.drop(121) shouldBe h2CumWorkBytes
+
+    // transition 2's parent state is transition 1's post-state, replayed insert for insert
+    val allHeaders2 = MutableAvl(
+      Seq(h1.id -> h1Record, h0.id -> h0Record, h2.id -> h2Record), AvlTreeFlags.InsertOnly)
+    val branchChain2 = MutableAvl(
+      Seq(h1.id -> h1.headerAndHeight, h2.id -> h2.headerAndHeight), AvlTreeFlags.InsertOnly)
+    val tipChain2 = MutableAvl(Seq(h0.id -> h0.headerAndHeight), AvlTreeFlags.InsertOnly)
+
+    allHeaders2.tree.digest.toArray shouldBe allHeaders1After.digest.toArray
+    branchChain2.tree.digest.toArray shouldBe branchChain1After.digest.toArray
+    tipChain2.tree.digest.toArray shouldBe tipChain1.tree.digest.toArray
+
+    // transition 2: append h3 to the branch. The tip register still says h0 / competingTipWork, so
+    // the only source for the new cumulative work is the record transition 1 wrote for h2.
+    // The contract builds the row it inserts into the branch chain as header ++ (tipHeight + 1),
+    // not header ++ (parentHeight + 1) -- only the all-headers record uses the parent's height. The
+    // fork fixture cannot see the difference because its fork tip and its branch parent share height
+    // 566092. Here the tip stays frozen on h0 (566092) while the branch advances to 566094, so the
+    // two diverge and the branch row must be built the way the contract builds it, or updDigest --
+    // and with it the whole switch -- would not match for reasons unrelated to cumulative work.
+    val h3BranchRow = h3.bytes ++ longToBytes((h0.height + 1).toLong)
+    val h2LookupProof = allHeaders2.lookupProof(h2.id)
+    val input2 = relayBox(tipChain2.tree, allHeaders2.tree, h0.height, h0.id, h0.cumulativeWork)
+    val branchChain2Before = branchChain2.tree
+    val branchInsertProof2 = branchChain2.insertProof(h3.id, h3BranchRow)
+    val branchChain2After = branchChain2.tree
+    val allHeadersInsertProof2 = allHeaders2.insertProof(h3.id,
+      allHeadersRecord(h3, branchChain2After.digest.toArray, h3.cumulativeWork))
+    val allHeaders2After = allHeaders2.tree
+    val contextVars2 = relayContextVars(h3.bytes, branchInsertProof2, h2LookupProof, branchChain2Before,
+      branchInsertProof2, allHeadersInsertProof2)
+
+    val output2 = relayCandidate(branchChain2After, allHeaders2After, h3.height, h3.id, h3.cumulativeWork)
+    relayProves(input2, output2, contextVars2) shouldBe true
+
+    // Negative control: what a regression substituting the tip register for the decoded parent work
+    // would produce. Everything else about the transition is identical, so the only check that can
+    // reject it is R8 == parentCumWork + work. Input state, proofs and context vars are reused as-is:
+    // relayProves builds a fresh prover and verifier per call and never touches the AVL provers, and
+    // no further insert is replayed here.
+    val tipDerivedWork = h0.cumulativeWork.add(blockWorkFromHeader(h3Bytes).bigInteger)
+    (tipDerivedWork.compareTo(h3.cumulativeWork) != 0) shouldBe true
+    val regressedOutput = relayCandidate(branchChain2After, allHeaders2After, h3.height, h3.id, tipDerivedWork)
+    relayProves(input2, regressedOutput, contextVars2) shouldBe false
   }
 
   property("BtcRelay rejects switching to a lower-work branch") {
@@ -395,7 +623,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
-      cumulativeWork = new BigInteger("100500500500"))
+      cumulativeWork = fixtureSeedWork)
     val h2Work = declaredBlockWork.getOrElse(blockWorkFromHeader(newHeaderBytes).bigInteger)
     val h2 = HeaderFixture(
       bytes = newHeaderBytes,
@@ -425,7 +653,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       relayTokens = relayTokens, ergoTree = outputErgoTree)
 
     RelayFixture(input, output, relayContextVars(h2.bytes, bestInsertProof, parentLookupProof, parentChainProvided, bestInsertProof,
-      allHeadersInsertProof, h2.cumulativeWork))
+      allHeadersInsertProof))
   }
 
   private def forkAppendFixture(
@@ -435,7 +663,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val h0 = HeaderFixture(
       hex = forkHeaderHex,
       height = 566092,
-      cumulativeWork = if (bestChainWorkWins) new BigInteger("100500500500") else new BigInteger("100500500500000000000000"))
+      cumulativeWork = if (bestChainWorkWins) fixtureSeedWork else new BigInteger("100500500500000000000000"))
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
@@ -463,7 +691,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       else relayCandidate(outputBestChain, allHeaders.tree, h0.height, h0.id, h0.cumulativeWork)
 
     RelayFixture(input, output, relayContextVars(h2.bytes, h1BestInsertProof, parentLookupProof, h1BestChainBefore,
-      h1BestInsertProof, allHeadersInsertProof, h2.cumulativeWork))
+      h1BestInsertProof, allHeadersInsertProof))
   }
 
   private def retargetAppendFixture(anchorHeight: Int = 562464): RelayFixture = {
@@ -474,7 +702,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val parent = HeaderFixture(
       hex = mainnetHeader564479Hex,
       height = 564479,
-      cumulativeWork = new BigInteger("100500500500"))
+      cumulativeWork = fixtureSeedWork)
     val nextBytes = fromHex(mainnetHeader564480Hex)
     val next = HeaderFixture(
       bytes = nextBytes,
@@ -497,7 +725,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val output = relayCandidate(bestChainAfter, allHeaders.tree, next.height, next.id, next.cumulativeWork)
 
     RelayFixture(input, output, relayContextVars(next.bytes, bestInsertProof, parentLookupProof, bestChainBefore, bestInsertProof,
-      allHeadersInsertProof, next.cumulativeWork, retargetAnchorId = Some(anchor.id), retargetAnchorProof = Some(retargetAnchorProof)))
+      allHeadersInsertProof, retargetAnchorId = Some(anchor.id), retargetAnchorProof = Some(retargetAnchorProof)))
   }
 
   private def txCheckFixture(
@@ -547,7 +775,6 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       parentChain: CAvlTree,
       parentChainInsertProof: Array[Byte],
       allHeadersInsertProof: Array[Byte],
-      cumulativeWork: BigInteger,
       retargetAnchorId: Option[Array[Byte]] = None,
       retargetAnchorProof: Option[Array[Byte]] = None): Map[Byte, EvaluatedValue[_ <: SType]] = {
     val base = Map(
@@ -556,8 +783,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       3.toByte -> ByteArrayConstant(parentLookupProof),
       4.toByte -> AvlTreeConstant(parentChain),
       5.toByte -> ByteArrayConstant(parentChainInsertProof),
-      6.toByte -> ByteArrayConstant(allHeadersInsertProof),
-      7.toByte -> ByteArrayConstant(cumulativeWork.toByteArray))
+      6.toByte -> ByteArrayConstant(allHeadersInsertProof))
     base ++ retargetAnchorId.map(8.toByte -> ByteArrayConstant(_)) ++
       retargetAnchorProof.map(9.toByte -> ByteArrayConstant(_))
   }
@@ -682,6 +908,22 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private def fromHex(hex: String): Array[Byte] =
     Base16.decode(hex).get
 
+  private val bigIntBytesScript: String =
+    """{
+      |    // 127 is the largest magnitude that fits without a sign byte; 128 forces a 0x00 prefix.
+      |    val small = bigInt("127")
+      |    val boundary = bigInt("128")
+      |    val fixtureWork = bigInt("26078778141431578512036")
+      |
+      |    sigmaProp(
+      |      small.toBytes == fromBase16("7f") &&
+      |      boundary.toBytes == fromBase16("0080") &&
+      |      byteArrayToBigInt(boundary.toBytes) == boundary &&
+      |      fixtureWork.toBytes == fromBase16("0585bbbfd457faf84aa4") &&
+      |      byteArrayToBigInt(fixtureWork.toBytes) == fixtureWork
+      |    )
+      |}""".stripMargin
+
   private val btcRelayScript: String =
     """{
       |    // registers:
@@ -699,7 +941,6 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    // #4 - parent header's best chain digest
       |    // #5 - parent header's best chain insert proof
       |    // #6 - all headers insert proof
-      |    // #7 - new header's cumulative work as byte array
       |    // #8 - retarget-period anchor header id, only when new height is divisible by 2016
       |    // #9 - retarget-period anchor lookup proof, only when new height is divisible by 2016
       |
@@ -861,14 +1102,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |        val parentCumWork = byteArrayToBigInt(parentData.slice(121, parentData.size))
       |        val cumWork = parentCumWork + work
+      |        val cumWorkBytes = cumWork.toBytes
       |
       |        val parentChainUpdateProof = getVar[Coll[Byte]](5).get
       |        val updDigest = parentChainProvided.insert(Coll(headerRow), parentChainUpdateProof).get.digest
       |
       |        val allHeadersInsertProof = getVar[Coll[Byte]](6).get
-      |        val cumWorkProvided = getVar[Coll[Byte]](7).get
       |
-      |        val keyVal = (id, (headerBytes ++ longToByteArray(parentHeight + 1) ++ updDigest ++ cumWorkProvided))
+      |        val keyVal = (id, (headerBytes ++ longToByteArray(parentHeight + 1) ++ updDigest ++ cumWorkBytes))
       |        val allHeadersDbUpdated = allHeadersDigest.insert(Coll(keyVal), allHeadersInsertProof).get
       |        val newAllHeadersDigestProvided = selfOut.R5[AvlTree].get
       |
@@ -876,7 +1117,6 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |                                    parentChainProvided.enabledOperations == bestChainDigest.enabledOperations &&
       |                                    parentChainProvided.keyLength == bestChainDigest.keyLength &&
       |                                    parentChainProvided.valueLengthOpt == bestChainDigest.valueLengthOpt &&
-      |                                    cumWork == byteArrayToBigInt(cumWorkProvided) &&
       |                                    allHeadersDbUpdated == newAllHeadersDigestProvided &&
       |                                    newAllHeadersDigestProvided.enabledOperations == allHeadersDigest.enabledOperations &&
       |                                    newAllHeadersDigestProvided.keyLength == allHeadersDigest.keyLength &&
