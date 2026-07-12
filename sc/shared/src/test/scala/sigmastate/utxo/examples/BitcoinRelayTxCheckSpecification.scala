@@ -216,6 +216,12 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
   }
 
+  property("BtcRelay rejects a tip height inconsistent with its authenticated parent record") {
+    val fixture = bestChainAppendFixture(inputTipHeight = Some(566091))
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+  }
+
   property("BtcRelay ignores a supplied cumulative work var") {
     val fixture = bestChainAppendFixture()
 
@@ -407,14 +413,10 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     tipChain2.tree.digest.toArray shouldBe tipChain1.tree.digest.toArray
 
     // transition 2: append h3 to the branch. The tip register still says h0 / competingTipWork, so
-    // the only source for the new cumulative work is the record transition 1 wrote for h2.
-    // The contract builds the row it inserts into the branch chain as header ++ (tipHeight + 1),
-    // not header ++ (parentHeight + 1) -- only the all-headers record uses the parent's height. The
-    // fork fixture cannot see the difference because its fork tip and its branch parent share height
-    // 566092. Here the tip stays frozen on h0 (566092) while the branch advances to 566094, so the
-    // two diverge and the branch row must be built the way the contract builds it, or updDigest --
-    // and with it the whole switch -- would not match for reasons unrelated to cumulative work.
-    val h3BranchRow = h3.bytes ++ longToBytes((h0.height + 1).toLong)
+    // the only source for the new cumulative work is the record transition 1 wrote for h2. The
+    // inserted row height must likewise come from h2's authenticated record, not the unrelated tip.
+    (h0.height + 1) should not be h3.height
+    val h3BranchRow = h3.headerAndHeight
     val h2LookupProof = allHeaders2.lookupProof(h2.id)
     val input2 = relayBox(tipChain2.tree, allHeaders2.tree, h0.height, h0.id, h0.cumulativeWork)
     val branchChain2Before = branchChain2.tree
@@ -428,6 +430,10 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
 
     val output2 = relayCandidate(branchChain2After, allHeaders2After, h3.height, h3.id, h3.cumulativeWork)
     relayProves(input2, output2, contextVars2) shouldBe true
+    val switchedTipRow = branchChain2.lookupValue(h3.id)
+    switchedTipRow shouldBe h3.headerAndHeight
+    byteArrayToLong(switchedTipRow.slice(80, 88)) shouldBe
+      output2.additionalRegisters(R6).value.asInstanceOf[Int].toLong
 
     // Negative control: what a regression substituting the tip register for the decoded parent work
     // would produce. Everything else about the transition is identical, so the only check that can
@@ -490,6 +496,20 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val fixture = txCheckFixture(tipHeight = bitcoinHeaderHeight + 5)
 
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+  }
+
+  property("BtcTxCheck confirmation depth depends on the authenticated R4 header height") {
+    val correctHeight = txCheckFixture(
+      tipHeight = bitcoinHeaderHeight + 5,
+      headerHeight = bitcoinHeaderHeight)
+    val understatedHeight = txCheckFixture(
+      tipHeight = bitcoinHeaderHeight + 5,
+      headerHeight = bitcoinHeaderHeight - 1)
+
+    txCheckProves(correctHeight.input, correctHeight.relayDataInput, correctHeight.contextVars) shouldBe false
+    // Producer-consumer pin: a relay row understated by one would release one confirmation early.
+    txCheckProves(understatedHeight.input, understatedHeight.relayDataInput,
+      understatedHeight.contextVars) shouldBe true
   }
 
   property("BtcTxCheck rejects a relay NFT quantity other than one") {
@@ -619,7 +639,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       outputAllHeadersFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly,
       outputAllHeadersKeyLength: Int = 32,
       outputAllHeadersValueLengthOpt: Option[Int] = None,
-      parentChainFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly): RelayFixture = {
+      parentChainFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly,
+      inputTipHeight: Option[Int] = None): RelayFixture = {
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
@@ -634,7 +655,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val allHeaders = MutableAvl(Seq(h1.id -> allHeadersRecord(h1, bestChain.tree.digest.toArray, h1.cumulativeWork)), AvlTreeFlags.InsertOnly)
     val parentLookupProof = allHeaders.lookupProof(h1.id)
 
-    val input = relayBox(bestChain.tree, allHeaders.tree, h1.height, h1.id, h1.cumulativeWork,
+    val input = relayBox(bestChain.tree, allHeaders.tree, inputTipHeight.getOrElse(h1.height), h1.id, h1.cumulativeWork,
       relayTokens = relayTokens)
     val bestChainBefore = bestChain.tree
     val bestInsertProof = bestChain.insertProof(h2.id, h2.headerAndHeight)
@@ -730,10 +751,11 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
 
   private def txCheckFixture(
       tipHeight: Int = bitcoinHeaderHeight + 6,
+      headerHeight: Int = bitcoinHeaderHeight,
       relayTokens: ArraySeq[Token] = canonicalRelayTokens): TxCheckFixture = {
     val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
     val headerId = fromHex("000000000003b8e6533b3f238ee00ff8dd68c3a2377a213f7a72c3ef0fe0c54b")
-    val headerAndHeight = header ++ longToBytes(bitcoinHeaderHeight.toLong)
+    val headerAndHeight = header ++ longToBytes(headerHeight.toLong)
     val bestChain = MutableAvl(Seq(headerId -> headerAndHeight), AvlTreeFlags.InsertOnly)
     val headerProof = bestChain.lookupProof(headerId)
 
@@ -852,6 +874,12 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     def lookupProof(key: Array[Byte]): Array[Byte] = {
       require(prover.performOneOperation(Lookup(ADKey @@ key)).isSuccess)
       prover.generateProof()
+    }
+
+    def lookupValue(key: Array[Byte]): Array[Byte] = {
+      val value = prover.performOneOperation(Lookup(ADKey @@ key)).get.get
+      prover.generateProof()
+      value
     }
   }
 
@@ -1031,8 +1059,16 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val workFitsSigned = workUnsigned <= maxSignedWork
       |    val work = if (workFitsSigned) workUnsigned.toSigned else bigInt("0")
       |
-      |    // best chain header record
-      |    val headerRow = (id, headerBytes ++ longToByteArray(tipHeight.toLong + 1))
+      |    val parentProof = getVar[Coll[Byte]](3).get
+      |    val parentData = allHeadersDigest.get(prevBlockId, parentProof).get
+      |
+      |    // Derive the new height from the authenticated parent record for every branch.
+      |    val parentHeight = byteArrayToLong(parentData.slice(80, 88))
+      |    val nextHeight = parentHeight + 1
+      |    val parentChainDigest = parentData.slice(88, 121)
+      |    val parentChainProvided = getVar[AvlTree](4).get
+      |    val headerRow = (id, headerBytes ++ longToByteArray(nextHeight))
+      |    val tipParentHeightOk = prevBlockId != tipHash || parentHeight == tipHeight.toLong
       |
       |    val validTipUpdate = if(prevBlockId == tipHash) {
       |
@@ -1050,7 +1086,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |        outBestChainTree.enabledOperations == bestChainDigest.enabledOperations &&
       |        outBestChainTree.keyLength == bestChainDigest.keyLength &&
       |        outBestChainTree.valueLengthOpt == bestChainDigest.valueLengthOpt &&
-      |        selfOut.R6[Int].get == tipHeight + 1 &&
+      |        selfOut.R6[Int].get == nextHeight &&
       |        selfOut.R7[Coll[Byte]].get == id &&
       |        selfOut.R8[BigInt].get == cumWork
       |    } else {
@@ -1058,18 +1094,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    }
       |
       |    val allHeadersDbUpdate = {
-      |
-      |        val parentProof = getVar[Coll[Byte]](3).get
-      |        val parentData = allHeadersDigest.get(prevBlockId, parentProof).get
-      |
       |        // parentData stores the full parent header so retarget checks can read timestamp and nBits.
-      |        val parentHeight = byteArrayToLong(parentData.slice(80, 88))
-      |        val nextHeight = parentHeight + 1
-      |
-      |        val parentChainDigest = parentData.slice(88, 121)
-      |
-      |        val parentChainProvided = getVar[AvlTree](4).get
-      |
       |        val difficultyTransitionOk = if (nextHeight % 2016L == 0L) {
       |            val anchorId = getVar[Coll[Byte]](8).get
       |            val anchorProof = getVar[Coll[Byte]](9).get
@@ -1109,7 +1134,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |        val allHeadersInsertProof = getVar[Coll[Byte]](6).get
       |
-      |        val keyVal = (id, (headerBytes ++ longToByteArray(parentHeight + 1) ++ updDigest ++ cumWorkBytes))
+      |        val keyVal = (id, (headerBytes ++ longToByteArray(nextHeight) ++ updDigest ++ cumWorkBytes))
       |        val allHeadersDbUpdated = allHeadersDigest.insert(Coll(keyVal), allHeadersInsertProof).get
       |        val newAllHeadersDigestProvided = selfOut.R5[AvlTree].get
       |
@@ -1132,7 +1157,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |                            outBestChainTree.enabledOperations == bestChainDigest.enabledOperations &&
       |                            outBestChainTree.keyLength == bestChainDigest.keyLength &&
       |                            outBestChainTree.valueLengthOpt == bestChainDigest.valueLengthOpt &&
-      |                            selfOut.R6[Int].get == parentHeight + 1 &&
+      |                            selfOut.R6[Int].get == nextHeight &&
       |                            selfOut.R7[Coll[Byte]].get == id &&
       |                            selfOut.R8[BigInt].get == cumWork
       |
@@ -1162,7 +1187,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |                           selfOut.propositionBytes == SELF.propositionBytes &&
       |                           selfOut.tokens == SELF.tokens
       |
-      |    sigmaProp(validHeaderSize && validPow && workFitsSigned && relayIdentityOk &&
+      |    sigmaProp(validHeaderSize && validPow && workFitsSigned && relayIdentityOk && tipParentHeightOk &&
       |              selfPreservation && validTipUpdate && allHeadersDbUpdate)
       |}""".stripMargin
 
