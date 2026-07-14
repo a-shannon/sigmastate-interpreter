@@ -533,6 +533,265 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(4.toByte, wrongProof)) shouldBe false
   }
 
+  property("BtcTxCheck rejects a payment proof deeper than the authenticated coinbase proof") {
+    val fixture = leafInternalAmbiguityFixture()
+
+    fixture.merkleProof.length shouldBe fixture.coinbaseProof.length + 1
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("merkleProof.size == coinbaseProof.size", "true")
+    val mutantFixture = leafInternalAmbiguityFixture(mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a wrong coinbase Merkle proof") {
+    val fixture = txCheckFixture()
+    val proof = fixture.coinbaseProof.map(_.toArray)
+    proof(0)(1) = (proof(0)(1) ^ 1).toByte
+    val wrongProof = proofConstant(proof.map(_.toColl))
+
+    txCheckProves(
+      fixture.input,
+      fixture.relayDataInput,
+      fixture.contextVars.updated(6.toByte, wrongProof)) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("computedCoinbaseRoot == merkleRootBytes", "true")
+    val mutantFixture = txCheckFixture(txCheckErgoTree = mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars.updated(6.toByte, wrongProof),
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck requires the coinbase depth proof to identify leaf zero") {
+    val base = txCheckFixture()
+    val coinbaseId = doubleSha256(base.coinbaseBytes)
+    val targetProof = Array((1.toByte +: coinbaseId).toColl)
+    val wrongDirectionProof = Array((0.toByte +: coinbaseId).toColl)
+    val fixture = txCheckFixtureForProofs(
+      base.coinbaseBytes,
+      targetProof,
+      base.coinbaseBytes,
+      wrongDirectionProof)
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant(
+      "proofElem.size == 33 && proofElem(0) == 1",
+      "proofElem.size == 33 && (proofElem(0) == 0 || proofElem(0) == 1)")
+    val mutantFixture = txCheckFixtureForProofs(
+      base.coinbaseBytes,
+      targetProof,
+      base.coinbaseBytes,
+      wrongDirectionProof,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects malformed coinbase proof levels") {
+    val fixture = txCheckFixture()
+    val proof = fixture.coinbaseProof.map(_.toArray)
+    proof(0) = proof(0) :+ 0.toByte
+    val malformedProof = proofConstant(proof.map(_.toColl))
+
+    txCheckProves(
+      fixture.input,
+      fixture.relayDataInput,
+      fixture.contextVars.updated(6.toByte, malformedProof)) shouldBe false
+
+    val mutantTree = compileTxCheckMutant(
+      "proofElem.size == 33 && proofElem(0) == 1",
+      "proofElem.size >= 33 && proofElem(0) == 1")
+    val mutantFixture = txCheckFixture(txCheckErgoTree = mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars.updated(6.toByte, malformedProof),
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a 64-byte coinbase depth witness") {
+    val coinbaseBytes = ambiguousCoinbase64ByteTx()
+    val fixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty)
+
+    coinbaseBytes.length shouldBe 64
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("coinbaseBytes.size != 64", "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a truncated coinbase depth witness") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes.take(41)
+    val fixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty)
+
+    coinbaseBytes.length shouldBe 41
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("coinbaseBytes.size >= 42", "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a depth witness with a nonzero coinbase prevout hash") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes.clone()
+    coinbaseBytes(5) = 1.toByte
+    val fixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty)
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant(
+      "coinbaseBytes.slice(5, 37) == fromBase16(\"0000000000000000000000000000000000000000000000000000000000000000\")",
+      "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a depth witness with a non-coinbase prevout index") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes.clone()
+    coinbaseBytes(37) = 0xfe.toByte
+    val fixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty)
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant(
+      "coinbaseBytes.slice(37, 41) == fromBase16(\"ffffffff\")",
+      "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a depth witness with more than one coinbase input") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes.clone()
+    coinbaseBytes(4) = 2.toByte
+    val fixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty)
+
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("coinbaseBytes(4) == 1", "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      Array.empty,
+      coinbaseBytes,
+      Array.empty,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck rejects Merkle paths deeper than the bounded verifier profile") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes
+    val proof = selfDuplicatingProof(coinbaseBytes, depth = 33)
+    val fixture = txCheckFixtureForProofs(coinbaseBytes, proof, coinbaseBytes, proof)
+
+    proof.length shouldBe 33
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe false
+
+    val mutantTree = compileTxCheckMutant("merkleProof.size <= maxMerkleDepth", "true")
+    val mutantFixture = txCheckFixtureForProofs(
+      coinbaseBytes,
+      proof,
+      coinbaseBytes,
+      proof,
+      mutantTree)
+    txCheckProves(
+      mutantFixture.input,
+      mutantFixture.relayDataInput,
+      mutantFixture.contextVars,
+      mutantTree) shouldBe true
+  }
+
+  property("BtcTxCheck accepts Merkle paths at the bounded verifier profile limit") {
+    val coinbaseBytes = txCheckFixture().coinbaseBytes
+    val proof = selfDuplicatingProof(coinbaseBytes, depth = 32)
+    val fixture = txCheckFixtureForProofs(coinbaseBytes, proof, coinbaseBytes, proof)
+
+    proof.length shouldBe 32
+    txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars) shouldBe true
+  }
+
+  property("BtcTxCheck rejects a missing authenticated-depth witness") {
+    val fixture = txCheckFixture()
+
+    txCheckProves(
+      fixture.input,
+      fixture.relayDataInput,
+      fixture.contextVars - 5.toByte) shouldBe false
+    txCheckProves(
+      fixture.input,
+      fixture.relayDataInput,
+      fixture.contextVars - 6.toByte) shouldBe false
+  }
+
   property("BtcTxCheck rejects six conventional confirmations") {
     val fixture = txCheckFixture(tipHeight = bitcoinHeaderHeight + 5)
 
@@ -626,7 +885,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private def txCheckProves(
       txCheckInput: ErgoBox,
       relayDataInput: ErgoBox,
-      contextVars: Map[Byte, EvaluatedValue[_ <: SType]]): Boolean = {
+      contextVars: Map[Byte, EvaluatedValue[_ <: SType]],
+      txCheckTree: ErgoTree = btcTxCheckTree): Boolean = {
     val contextExtension = ContextExtension(contextVars)
     val tx = new ErgoLikeTransaction(
       IndexedSeq(Input(txCheckInput.id, ProverResult(Array.emptyByteArray, contextExtension))),
@@ -642,7 +902,14 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       selfIndex = 0,
       activatedVersion = V6SoftForkVersion)
 
-    proveAndVerify(btcTxCheckTree, ctx, contextVars)
+    proveAndVerify(txCheckTree, ctx, contextVars)
+  }
+
+  private def compileTxCheckMutant(original: String, replacement: String): ErgoTree = {
+    val firstIndex = btcTxCheckScript.indexOf(original)
+    firstIndex should not be -1
+    firstIndex shouldBe btcTxCheckScript.lastIndexOf(original)
+    compileV6(btcTxCheckScript.replace(original, replacement))
   }
 
   private def proveAndVerify(
@@ -668,6 +935,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       relayDataInput: ErgoBox,
       contextVars: Map[Byte, EvaluatedValue[_ <: SType]],
       merkleProof: Array[Coll[Byte]],
+      coinbaseBytes: Array[Byte],
+      coinbaseProof: Array[Coll[Byte]],
       txBytes: Array[Byte],
       headerId: Array[Byte])
 
@@ -821,7 +1090,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private def txCheckFixture(
       tipHeight: Int = bitcoinHeaderHeight + 6,
       headerHeight: Int = bitcoinHeaderHeight,
-      relayTokens: ArraySeq[Token] = canonicalRelayTokens): TxCheckFixture = {
+      relayTokens: ArraySeq[Token] = canonicalRelayTokens,
+      txCheckErgoTree: ErgoTree = btcTxCheckTree): TxCheckFixture = {
     val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
     val headerId = fromHex("000000000003b8e6533b3f238ee00ff8dd68c3a2377a213f7a72c3ef0fe0c54b")
     val headerAndHeight = header ++ longToBytes(headerHeight.toLong)
@@ -840,12 +1110,23 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     val merkleProof = Array(
       (1.toByte +: tx3Id.reverse).toColl,
       (0.toByte +: doubleSha256(tx1.reverse ++ tx2.reverse)).toColl)
+    val coinbaseBytes = fromHex(
+      "01000000010000000000000000000000000000000000000000000000000000000000000000" +
+      "ffffffff08042a8b091b025e3cffffffff0100f2052a01000000434104d77816ded32ccc56fa" +
+      "d6f455676c07908da96a37a7b9d2fd510cd4ddd92f3104f3d6e7134bd159fed3741522265" +
+      "a901d44ec2ab428231c0e4986c52a22f13577ac00000000")
+    val coinbaseProof = Array(
+      (1.toByte +: tx2.reverse).toColl,
+      (1.toByte +: doubleSha256(tx3Id.reverse ++ tx3Id.reverse)).toColl)
+
+    doubleSha256(coinbaseBytes).sameElements(tx1.reverse) shouldBe true
+    coinbaseProof.length shouldBe merkleProof.length
 
     val relayDataInput = relayBox(bestChain.tree, bestChain.tree, tipHeight, headerId, BigInteger.ZERO,
       transactionId = ModifierId @@ Base16.encode(txId), relayTokens = relayTokens)
     val txCheckInput = testBox(
       relayBoxValue,
-      btcTxCheckTree,
+      txCheckErgoTree,
       creationHeight = 0,
       transactionId = ModifierId @@ Base16.encode(txId.reverse),
       boxIndex = 0)
@@ -854,9 +1135,117 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       1.toByte -> ByteArrayConstant(txBytes),
       2.toByte -> ByteArrayConstant(headerId),
       3.toByte -> ByteArrayConstant(headerProof),
-      4.toByte -> CollectionConstant[SCollection[SByte.type]](merkleProof.toColl, SCollection(SByte)))
+      4.toByte -> CollectionConstant[SCollection[SByte.type]](merkleProof.toColl, SCollection(SByte)),
+      5.toByte -> ByteArrayConstant(coinbaseBytes),
+      6.toByte -> CollectionConstant[SCollection[SByte.type]](coinbaseProof.toColl, SCollection(SByte)))
 
-    TxCheckFixture(txCheckInput, relayDataInput, contextVars, merkleProof, txBytes, headerId)
+    TxCheckFixture(txCheckInput, relayDataInput, contextVars, merkleProof, coinbaseBytes,
+      coinbaseProof, txBytes, headerId)
+  }
+
+  private def leafInternalAmbiguityFixture(
+      txCheckErgoTree: ErgoTree = btcTxCheckTree): TxCheckFixture = {
+    val base = txCheckFixture()
+    val paymentTxId = doubleSha256(base.txBytes)
+    val internalSibling = Array.fill(32)(0x42.toByte)
+    val ambiguousLeaf = paymentTxId ++ internalSibling
+    val ambiguousLeafId = doubleSha256(ambiguousLeaf)
+    val coinbaseId = doubleSha256(base.coinbaseBytes)
+    val paymentProof = Array(
+      (1.toByte +: internalSibling).toColl,
+      (0.toByte +: coinbaseId).toColl)
+    val coinbaseProof = Array((1.toByte +: ambiguousLeafId).toColl)
+
+    ambiguousLeaf.length shouldBe 64
+    merkleRootFromProof(base.txBytes, paymentProof)
+      .sameElements(merkleRootFromProof(base.coinbaseBytes, coinbaseProof)) shouldBe true
+
+    txCheckFixtureForProofs(
+      base.txBytes,
+      paymentProof,
+      base.coinbaseBytes,
+      coinbaseProof,
+      txCheckErgoTree)
+  }
+
+  private def txCheckFixtureForProofs(
+      txBytes: Array[Byte],
+      merkleProof: Array[Coll[Byte]],
+      coinbaseBytes: Array[Byte],
+      coinbaseProof: Array[Coll[Byte]],
+      txCheckErgoTree: ErgoTree = btcTxCheckTree): TxCheckFixture = {
+    val merkleRoot = merkleRootFromProof(txBytes, merkleProof)
+    require(merkleRoot.sameElements(merkleRootFromProof(coinbaseBytes, coinbaseProof)))
+    val header = fromHex(forkHeaderHex)
+    Array.copy(merkleRoot, 0, header, 36, 32)
+    val headerId = doubleSha256(header)
+    val headerAndHeight = header ++ longToBytes(bitcoinHeaderHeight.toLong)
+    val bestChain = MutableAvl(Seq(headerId -> headerAndHeight), AvlTreeFlags.InsertOnly)
+    val headerProof = bestChain.lookupProof(headerId)
+    val txId = doubleSha256(txBytes)
+    val relayDataInput = relayBox(
+      bestChain.tree,
+      bestChain.tree,
+      bitcoinHeaderHeight + 6,
+      headerId,
+      BigInteger.ZERO,
+      transactionId = ModifierId @@ Base16.encode(txId))
+    val txCheckInput = testBox(
+      relayBoxValue,
+      txCheckErgoTree,
+      creationHeight = 0,
+      transactionId = ModifierId @@ Base16.encode(txId.reverse),
+      boxIndex = 0)
+    val contextVars: Map[Byte, EvaluatedValue[_ <: SType]] = Map(
+      1.toByte -> ByteArrayConstant(txBytes),
+      2.toByte -> ByteArrayConstant(headerId),
+      3.toByte -> ByteArrayConstant(headerProof),
+      4.toByte -> proofConstant(merkleProof),
+      5.toByte -> ByteArrayConstant(coinbaseBytes),
+      6.toByte -> proofConstant(coinbaseProof))
+
+    TxCheckFixture(txCheckInput, relayDataInput, contextVars, merkleProof, coinbaseBytes,
+      coinbaseProof, txBytes, headerId)
+  }
+
+  private def merkleRootFromProof(txBytes: Array[Byte], proof: Array[Coll[Byte]]): Array[Byte] =
+    proof.foldLeft(doubleSha256(txBytes)) { (prevHash, proofElemColl) =>
+      val proofElem = proofElemColl.toArray
+      require(proofElem.length >= 33)
+      val elemHash = proofElem.slice(1, 33)
+      if (proofElem(0) == 0) {
+        doubleSha256(elemHash ++ prevHash)
+      } else {
+        doubleSha256(prevHash ++ elemHash)
+      }
+    }
+
+  private def proofConstant(proof: Array[Coll[Byte]]): EvaluatedValue[_ <: SType] =
+    CollectionConstant[SCollection[SByte.type]](proof.toColl, SCollection(SByte))
+
+  private def selfDuplicatingProof(txBytes: Array[Byte], depth: Int): Array[Coll[Byte]] = {
+    var current = doubleSha256(txBytes)
+    Array.fill(depth) {
+      val proofElem = (1.toByte +: current).toColl
+      current = doubleSha256(current ++ current)
+      proofElem
+    }
+  }
+
+  private def ambiguousCoinbase64ByteTx(): Array[Byte] = {
+    val tx = Array.fill(64)(0.toByte)
+    tx(4) = 1.toByte
+    java.util.Arrays.fill(tx, 37, 41, 0xff.toByte)
+    tx(41) = 4.toByte
+    tx(42) = 1.toByte
+    tx(43) = 2.toByte
+    tx(44) = 3.toByte
+    tx(45) = 4.toByte
+    java.util.Arrays.fill(tx, 46, 50, 0xff.toByte)
+    tx(50) = 1.toByte
+    tx(51) = 1.toByte
+    tx(59) = 0.toByte
+    tx
   }
 
   private def relayContextVars(
@@ -1270,6 +1659,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    // #2 - header id
       |    // #3 - headerProof
       |    // #4 - Merkle proof
+      |    // #5 - stripped coinbase transaction bytes used as the authenticated depth witness
+      |    // #6 - coinbase Merkle proof; every direction is left because coinbase is leaf zero
       |
       |    // registers:
       |    // no registers used
@@ -1278,6 +1669,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val relayNftId = fromBase16("0000000000000000000000000000000000000000000000000000000000000000")
       |    // Six descendants after the containing header means seven confirmations including that header.
       |    val minDescendants = 6
+      |    // Bound proof work and stay inside Bitcoin's 32-bit transaction-count domain.
+      |    val maxMerkleDepth = 32
       |
       |    val relayDataInput = CONTEXT.dataInputs(0)
       |
@@ -1316,6 +1709,11 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val proofShapeOk = merkleProof.forall({ (proofElem: Coll[Byte]) =>
       |        proofElem.size == 33 && (proofElem(0) == 0 || proofElem(0) == 1)
       |    })
+      |    val coinbaseBytes = getVar[Coll[Byte]](5).get
+      |    val coinbaseProof = getVar[Coll[Coll[Byte]]](6).get
+      |    val coinbaseProofShapeOk = coinbaseProof.forall({ (proofElem: Coll[Byte]) =>
+      |        proofElem.size == 33 && proofElem(0) == 1
+      |    })
       |
       |    def computeLevel(prevHash: Coll[Byte], proofElem: Coll[Byte]) = {
       |        val elemHash = proofElem.slice(1,33)
@@ -1327,8 +1725,27 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    }
       |
       |    val computedMerkleRoot = merkleProof.fold(txId, computeLevel)
+      |    val computedCoinbaseRoot = coinbaseProof.fold(doubleSha256(coinbaseBytes), computeLevel)
       |
-      |    val properProof = proofShapeOk && computedMerkleRoot == merkleRootBytes
+      |    // A second proof for the non-64-byte coinbase authenticates the actual leaf depth.
+      |    // Equal depth rejects the shortened proof used to reinterpret a 64-byte leaf as an internal node,
+      |    // without trusting an uncommitted transaction count.
+      |    val coinbaseShapeOk = if (coinbaseBytes.size >= 42) {
+      |      coinbaseBytes.size != 64 &&
+      |      coinbaseBytes(4) == 1 &&
+      |      coinbaseBytes.slice(5, 37) == fromBase16("0000000000000000000000000000000000000000000000000000000000000000") &&
+      |      coinbaseBytes.slice(37, 41) == fromBase16("ffffffff")
+      |    } else {
+      |      false
+      |    }
+      |    val proofDepthOk = merkleProof.size <= maxMerkleDepth &&
+      |                       merkleProof.size == coinbaseProof.size
+      |    val coinbaseProofOk = coinbaseProofShapeOk && computedCoinbaseRoot == merkleRootBytes
+      |    val properProof = proofShapeOk &&
+      |                      computedMerkleRoot == merkleRootBytes &&
+      |                      coinbaseShapeOk &&
+      |                      proofDepthOk &&
+      |                      coinbaseProofOk
       |
       |    // This predicate authenticates relay-confirmed inclusion; spending policy is supplied by the composing contract.
       |
