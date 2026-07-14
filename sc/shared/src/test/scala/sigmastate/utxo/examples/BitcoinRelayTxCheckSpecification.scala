@@ -243,6 +243,26 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
   }
 
+  property("BtcRelay binds a direct-tip parent chain digest to SELF best chain") {
+    val fixture = bestChainAppendFixture(divergentParentChainDigest = true)
+
+    relayProves(fixture.input, fixture.output, fixture.contextVars) shouldBe false
+
+    // Disable only the digest equality. Acceptance under this mutant proves that the production
+    // rejection above is isolated to the direct-tip parent-state guard.
+    val digestGuard = "parentChainDigest == bestChainDigest.digest"
+    val firstGuardIndex = btcRelayScript.indexOf(digestGuard)
+    firstGuardIndex should not be -1
+    firstGuardIndex shouldBe btcRelayScript.lastIndexOf(digestGuard)
+    val mutantTree = compileV6(btcRelayScript.replace(digestGuard, "true"))
+    val mutantFixture = bestChainAppendFixture(
+      divergentParentChainDigest = true,
+      relayErgoTree = mutantTree,
+      outputErgoTree = mutantTree)
+
+    relayProves(mutantFixture.input, mutantFixture.output, mutantFixture.contextVars, mutantTree) shouldBe true
+  }
+
   property("BtcRelay ignores a supplied cumulative work var") {
     val fixture = bestChainAppendFixture()
 
@@ -584,7 +604,8 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
   private def relayProves(
       relayInput: ErgoBox,
       relayOutput: ErgoBoxCandidate,
-      contextVars: Map[Byte, EvaluatedValue[_ <: SType]]): Boolean = {
+      contextVars: Map[Byte, EvaluatedValue[_ <: SType]],
+      relayTree: ErgoTree = btcRelayTree): Boolean = {
     val contextExtension = ContextExtension(contextVars)
     val tx = new ErgoLikeTransaction(
       IndexedSeq(Input(relayInput.id, ProverResult(Array.emptyByteArray, contextExtension))),
@@ -599,7 +620,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       self = relayInput,
       activatedVersion = V6SoftForkVersion)
 
-    proveAndVerify(btcRelayTree, ctx, contextVars)
+    proveAndVerify(relayTree, ctx, contextVars)
   }
 
   private def txCheckProves(
@@ -664,7 +685,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       parentChainFlags: AvlTreeFlags = AvlTreeFlags.InsertOnly,
       inputTipHeight: Option[Int] = None,
       inputTipWork: Option[BigInteger] = None,
-      outputTipWork: Option[BigInteger] = None): RelayFixture = {
+      outputTipWork: Option[BigInteger] = None,
+      divergentParentChainDigest: Boolean = false,
+      relayErgoTree: ErgoTree = btcRelayTree): RelayFixture = {
     val h1 = HeaderFixture(
       hex = mainnetHeader566092Hex,
       height = 566092,
@@ -676,16 +699,35 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       cumulativeWork = h1.cumulativeWork.add(h2Work))
 
     val bestChain = MutableAvl(Seq(h1.id -> h1.headerAndHeight), AvlTreeFlags.InsertOnly)
-    val allHeaders = MutableAvl(Seq(h1.id -> allHeadersRecord(h1, bestChain.tree.digest.toArray, h1.cumulativeWork)), AvlTreeFlags.InsertOnly)
+    // The divergent case keeps both AVL proofs valid while making the parent record's committed
+    // chain digest disagree with SELF.R4, isolating the direct-tip coherence check.
+    val parentChain = if (divergentParentChainDigest) {
+      val unrelatedHeader = HeaderFixture(forkHeaderHex, h1.height, h1.cumulativeWork)
+      MutableAvl(Seq(
+        h1.id -> h1.headerAndHeight,
+        unrelatedHeader.id -> unrelatedHeader.headerAndHeight), AvlTreeFlags.InsertOnly)
+    } else {
+      bestChain
+    }
+    val allHeaders = MutableAvl(Seq(
+      h1.id -> allHeadersRecord(h1, parentChain.tree.digest.toArray, h1.cumulativeWork)), AvlTreeFlags.InsertOnly)
     val parentLookupProof = allHeaders.lookupProof(h1.id)
 
     val input = relayBox(bestChain.tree, allHeaders.tree, inputTipHeight.getOrElse(h1.height), h1.id,
       inputTipWork.getOrElse(h1.cumulativeWork),
-      relayTokens = relayTokens)
-    val bestChainBefore = bestChain.tree
+      relayTokens = relayTokens,
+      ergoTree = relayErgoTree)
+    val parentChainBefore = parentChain.tree
     val bestInsertProof = bestChain.insertProof(h2.id, h2.headerAndHeight)
     val bestChainAfter = bestChain.tree
-    val allHeadersInsertProof = allHeaders.insertProof(h2.id, allHeadersRecord(h2, bestChainAfter.digest.toArray, h2.cumulativeWork))
+    val parentChainInsertProof = if (divergentParentChainDigest) {
+      parentChain.insertProof(h2.id, h2.headerAndHeight)
+    } else {
+      bestInsertProof
+    }
+    val parentChainAfter = if (divergentParentChainDigest) parentChain.tree else bestChainAfter
+    val allHeadersInsertProof = allHeaders.insertProof(h2.id,
+      allHeadersRecord(h2, parentChainAfter.digest.toArray, h2.cumulativeWork))
     val outputBestChain = CAvlTree(bestChainAfter.treeData.copy(
       treeFlags = outputBestChainFlags,
       keyLength = outputBestChainKeyLength,
@@ -694,12 +736,13 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       treeFlags = outputAllHeadersFlags,
       keyLength = outputAllHeadersKeyLength,
       valueLengthOpt = outputAllHeadersValueLengthOpt))
-    val parentChainProvided = CAvlTree(bestChainBefore.treeData.copy(treeFlags = parentChainFlags))
+    val parentChainProvided = CAvlTree(parentChainBefore.treeData.copy(treeFlags = parentChainFlags))
     val output = relayCandidate(outputBestChain, outputAllHeaders, h2.height, h2.id,
       outputTipWork.getOrElse(h2.cumulativeWork),
       relayTokens = relayTokens, ergoTree = outputErgoTree)
 
-    RelayFixture(input, output, relayContextVars(h2.bytes, bestInsertProof, parentLookupProof, parentChainProvided, bestInsertProof,
+    RelayFixture(input, output, relayContextVars(
+      h2.bytes, bestInsertProof, parentLookupProof, parentChainProvided, parentChainInsertProof,
       allHeadersInsertProof))
   }
 
@@ -1096,9 +1139,12 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |    val nextCumWork = parentCumWork + work
       |    val parentChainProvided = getVar[AvlTree](4).get
       |    val headerRow = (id, headerBytes ++ longToByteArray(nextHeight))
-      |    // A direct-tip successor must advance R6 and R8 from the same authenticated parent record.
+      |    // A direct-tip successor must advance R4, R6 and R8 from the same authenticated parent record;
+      |    // otherwise valid proofs can advance R4 and the next all-headers record from different trees.
       |    val tipParentStateOk = prevBlockId != tipHash ||
-      |                           (parentHeight == tipHeight.toLong && parentCumWork == tipWork)
+      |                           (parentHeight == tipHeight.toLong &&
+      |                            parentCumWork == tipWork &&
+      |                            parentChainDigest == bestChainDigest.digest)
       |
       |    val validTipUpdate = if(prevBlockId == tipHash) {
       |
