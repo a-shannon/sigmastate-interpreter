@@ -9,7 +9,8 @@ import sigmastate._
 import sigmastate.helpers.CompilerTestingCommons
 import sigmastate.interpreter.Interpreter.ScriptEnv
 import sigma.ast.{Apply, MethodCall, ZKProofBlock}
-import sigma.exceptions.{GraphBuildingException, InvalidArguments, TyperException}
+import sigma.compiler.SigmaCompiler
+import sigma.exceptions.{CompilerException, GraphBuildingException, InvalidArguments, TyperException}
 import sigma.serialization.ValueSerializer
 import sigma.serialization.generators.ObjectGenerators
 
@@ -345,5 +346,19 @@ class SigmaCompilerTest extends CompilerTestingCommons with LangTests with Objec
         GetVarIntArray(2).get,
         GetVar(3.toByte, SCollection(SSigmaProp)).get
       )
+  }
+
+  property("stack overflow during typecheck is wrapped into CompilerException") {
+    // Regression test for a StackOverflowError in the binder's reduce/rewriting loop
+    // (see SrcCtxCallbackRewriter / SigmaBinder.eval). A recursive environment binding,
+    // where a name resolves to an Ident of the same name, makes the binder's reduce
+    // strategy loop forever and overflow the stack. SigmaCompiler.typecheck must catch
+    // the StackOverflowError and rethrow it as a checked CompilerException instead of
+    // letting it escalate to a fatal JVM error.
+    val compiler = SigmaCompiler(TestnetNetworkPrefix)
+    val recursiveEnv: ScriptEnv = Map("x" -> Ident("x", NoType))
+    val parsed = compiler.parse("x")
+    val e = the[CompilerException] thrownBy compiler.typecheck(recursiveEnv, parsed)
+    e.getMessage should include("too complex or recursive")
   }
 }

@@ -14,6 +14,7 @@ import sigma.ast.syntax.SValue
 import SCollectionMethods.{ExistsMethod, ForallMethod, MapMethod}
 import sigma.compiler.ir.{GraphIRReflection, IRContext}
 import sigma.compiler.phases.{SigmaBinder, SigmaTyper}
+import sigma.exceptions.CompilerException
 import sigmastate.InterpreterReflection
 import sigmastate.lang.SigmaParser
 
@@ -70,13 +71,25 @@ class SigmaCompiler private(settings: CompilerSettings) {
 
   /** Typechecks the given parsed expression and assigns types for all sub-expressions. */
   def typecheck(env: ScriptEnv, parsed: SValue): Value[SType] = {
-    val predefinedFuncRegistry = new PredefinedFuncRegistry(builder)
-    val binder = new SigmaBinder(env, builder, networkPrefix, predefinedFuncRegistry)
-    val bound = binder.bind(parsed)
-    val typeEnv = env.collect { case (k, v: SType) => k -> v }
-    val typer = new SigmaTyper(builder, predefinedFuncRegistry, typeEnv, settings.lowerMethodCalls)
-    val typed = typer.typecheck(bound)
-    typed
+    try {
+      val predefinedFuncRegistry = new PredefinedFuncRegistry(builder)
+      val binder = new SigmaBinder(env, builder, networkPrefix, predefinedFuncRegistry)
+      val bound = binder.bind(parsed)
+      val typeEnv = env.collect { case (k, v: SType) => k -> v }
+      val typer = new SigmaTyper(builder, predefinedFuncRegistry, typeEnv, settings.lowerMethodCalls)
+      val typed = typer.typecheck(bound)
+      typed
+    } catch {
+      // Rethrow OutOfMemoryError: it is not safe to continue after the heap is exhausted.
+      case oom: OutOfMemoryError => throw oom
+      // Wrap StackOverflowError (and other non-OOM VirtualMachineErrors) into a checked
+      // CompilerException so that a malformed/pathological script results in a normal
+      // compilation error instead of a fatal JVM error.
+      case vme: VirtualMachineError =>
+        throw new CompilerException(
+          s"Script compilation failed (${vme.getClass.getSimpleName}): script is too complex or recursive",
+          parsed.sourceContext.toOption)
+    }
   }
 
   def typecheck(env: ScriptEnv, code: String): Value[SType] = {
