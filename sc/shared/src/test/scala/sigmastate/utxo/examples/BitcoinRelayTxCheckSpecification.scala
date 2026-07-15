@@ -875,11 +875,37 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     txCheckProves(fixture.input, fixture.relayDataInput, fixture.contextVars.updated(2.toByte, ByteArrayConstant(headerId))) shouldBe false
   }
 
+  property("BtcTxCheck rejects display-order header id instead of the relay key order") {
+    val fixture = txCheckFixture()
+    val displayOrderHeaderId = fixture.headerId.reverse
+
+    txCheckProves(fixture.input, fixture.relayDataInput,
+      fixture.contextVars.updated(2.toByte, ByteArrayConstant(displayOrderHeaderId))) shouldBe false
+  }
+
+  property("BtcTxCheck real fixture uses the relay header id byte order") {
+    val fixture = txCheckFixture()
+    val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
+    val displayOrderHeaderId = fromHex("000000000003b8e6533b3f238ee00ff8dd68c3a2377a213f7a72c3ef0fe0c54b")
+
+    fixture.headerId.sameElements(doubleSha256(header)) shouldBe true
+    fixture.headerId.reverse.sameElements(displayOrderHeaderId) shouldBe true
+  }
+
   property("relay work calculation is pinned for the mainnet header fixture") {
     val header = fromHex(mainnetHeader566093Hex)
 
     targetFromHeader(header) shouldBe expectedHeader566093Target
     blockWorkFromHeader(header) shouldBe expectedHeader566093Work
+  }
+
+  property("relay header id byte order matches Bitcoin serialized parent links") {
+    val parent = fromHex(mainnetHeader566092Hex)
+    val child = fromHex(mainnetHeader566093Hex)
+    val parentRelayId = doubleSha256(parent)
+
+    child.slice(4, 36).sameElements(parentRelayId) shouldBe true
+    child.slice(4, 36).sameElements(parentRelayId.reverse) shouldBe false
   }
 
   property("relay retarget calculation is pinned for the mainnet boundary fixture") {
@@ -1160,7 +1186,9 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       relayTokens: ArraySeq[Token] = canonicalRelayTokens,
       txCheckErgoTree: ErgoTree = btcTxCheckTree): TxCheckFixture = {
     val header = fromHex("01000000076379e2c0ec4a614ad1bf0ec716e6873f2c7abac604a08cc78e070000000000579a6bbcd07e9c3d622672ad20495d4485b5233395ab4081db7cab0fd2b577d2396cec4c2a8b091b031a7313")
-    val headerId = fromHex("000000000003b8e6533b3f238ee00ff8dd68c3a2377a213f7a72c3ef0fe0c54b")
+    // BtcRelay keys both authenticated trees by the raw double-SHA256 bytes. Reversal is
+    // only for conventional display and must not cross this producer-consumer boundary.
+    val headerId = doubleSha256(header)
     val headerAndHeight = header ++ longToBytes(headerHeight.toLong)
     val bestChain = MutableAvl(Seq(headerId -> headerAndHeight), AvlTreeFlags.InsertOnly)
     val headerProof = bestChain.lookupProof(headerId)
@@ -1537,6 +1565,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
       |
       |    def doubleSha256(bytes: Coll[Byte]) = sha256(sha256(bytes))
       |
+      |    // Raw digest bytes match Bitcoin's serialized prevBlockId and are the relay AVL key.
       |    def headerId(headerBytes: Coll[Byte]) = doubleSha256(headerBytes)
       |
       |    val candidateHeaderBytes = getVar[Coll[Byte]](1).get
@@ -1723,7 +1752,7 @@ class BitcoinRelayTxCheckSpecification extends CompilerTestingCommons with Compi
     """{
       |    // context vars:
       |    // #1 - tx bytes
-      |    // #2 - header id
+      |    // #2 - header id in relay/internal hash byte order
       |    // #3 - headerProof
       |    // #4 - Merkle proof
       |    // #5 - stripped coinbase transaction bytes used as the authenticated depth witness
