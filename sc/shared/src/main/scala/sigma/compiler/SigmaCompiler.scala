@@ -15,6 +15,7 @@ import SCollectionMethods.{ExistsMethod, ForallMethod, MapMethod}
 import sigma.compiler.ir.{GraphIRReflection, IRContext}
 import sigma.compiler.phases.{SigmaBinder, SigmaTyper}
 import sigma.exceptions.CompilerException
+import sigma.Environment
 import sigmastate.InterpreterReflection
 import sigmastate.lang.SigmaParser
 
@@ -82,12 +83,14 @@ class SigmaCompiler private(settings: CompilerSettings) {
     } catch {
       // Rethrow OutOfMemoryError: it is not safe to continue after the heap is exhausted.
       case oom: OutOfMemoryError => throw oom
-      // Wrap StackOverflowError (and other non-OOM VirtualMachineErrors) into a checked
-      // CompilerException so that a malformed/pathological script results in a normal
-      // compilation error instead of a fatal JVM error.
-      case vme: VirtualMachineError =>
+      // Wrap a stack overflow into a checked CompilerException so that a
+      // malformed/pathological script results in a normal compilation error instead of
+      // a fatal runtime error. Note that on the JVM a stack overflow is signalled as a
+      // StackOverflowError (a VirtualMachineError), while on Scala.js it surfaces as a
+      // scala.scalajs.js.JavaScriptException wrapping a native RangeError.
+      case t: Throwable if SigmaCompiler.isStackOverflow(t) =>
         throw new CompilerException(
-          s"Script compilation failed (${vme.getClass.getSimpleName}): script is too complex or recursive",
+          s"Script compilation failed (stack overflow): script is too complex or recursive",
           parsed.sourceContext.toOption)
     }
   }
@@ -167,6 +170,30 @@ class SigmaCompiler private(settings: CompilerSettings) {
 object SigmaCompiler {
   /** Force initialization of reflection before any instance of SigmaCompiler is used. */
   val _ = (InterpreterReflection, GraphIRReflection)
+
+  /** Returns true if the given throwable represents a stack overflow.
+    *
+    * On the JVM a stack overflow is signalled as a [[StackOverflowError]] (a
+    * [[VirtualMachineError]]). On Scala.js there is no StackOverflowError; instead the
+    * JavaScript engine throws a native `RangeError` ("Maximum call stack size exceeded"),
+    * which Scala.js wraps into a `scala.scalajs.js.JavaScriptException`. Since shared code
+    * cannot reference JS-only types, the JS case is detected by inspecting the exception
+    * class name and message.
+    */
+  private def isStackOverflow(t: Throwable): Boolean = {
+    if (Environment.current.isJVM)
+      t.isInstanceOf[VirtualMachineError] && !t.isInstanceOf[OutOfMemoryError]
+    else {
+      // Scala.js: detect the native RangeError wrapped in js.JavaScriptException.
+      val className = t.getClass.getName
+      val message = String.valueOf(t.getMessage)
+      className.contains("JavaScriptException") &&
+        (message.contains("Maximum call stack size exceeded") ||
+          message.contains("call stack size exceeded") ||
+          message.contains("too much recursion") ||
+          message.contains("RangeError"))
+    }
+  }
 
   /** Constructs an instance for the given settings. */
   def apply(settings: CompilerSettings): SigmaCompiler =
