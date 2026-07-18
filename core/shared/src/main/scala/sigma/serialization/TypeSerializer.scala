@@ -31,7 +31,12 @@ class TypeSerializer {
     case SUnit => w.put(SUnit.typeCode)
     case SBox => w.put(SBox.typeCode)
     case SAvlTree => w.put(SAvlTree.typeCode)
-    case SMerkleTree => w.put(SMerkleTree.typeCode)
+    case SMerkleTree =>
+      if (VersionContext.current.isV4OrLaterErgoTreeVersion) {
+        w.put(SMerkleTree.typeCode)
+      } else {
+        throw SerializerException("MerkleTree type requires script version 4 or later")
+      }
     case SContext => w.put(SContext.typeCode)
     case SGlobal => w.put(SGlobal.typeCode)
     case SHeader => w.put(SHeader.typeCode)

@@ -42,18 +42,6 @@ case class VersionContext(activatedVersion: Byte, ergoTreeVersion: Byte) {
 }
 
 object VersionContext {
-  /** Maximum version of ErgoTree supported by this interpreter release.
-    * See version bits in `ErgoTree.header` for more details.
-    * This value should be increased with each new protocol update via soft-fork.
-    * The following values are used for current and upcoming forks:
-    * - version 3.x this value must be 0
-    * - in v4.0 must be 1
-    * - in v5.x must be 2
-    * - in v6.x must be 3
-    * etc.
-    */
-  val MaxSupportedScriptVersion: Byte = 3 // supported versions 0, 1, 2, 3
-
   /** The first version of ErgoTree starting from which the JIT costing interpreter is used. */
   val JitActivationVersion: Byte = 2
 
@@ -64,10 +52,21 @@ object VersionContext {
 
   /**
    * The version of ErgoTree introduced by the 7.0 soft-fork.
-   * `MaxSupportedScriptVersion` stays at 3 until the activation rollout; this constant
-   * is a forward declaration so new ops/methods can be gated against it before flip.
    */
   val V7SoftForkVersion: Byte = 4
+
+  /** Maximum version of ErgoTree supported by this interpreter release.
+    * See version bits in `ErgoTree.header` for more details.
+    * This value should be increased with each new protocol update via soft-fork.
+    * The following values are used for current and upcoming forks:
+    * - version 3.x this value must be 0
+    * - in v4.0 must be 1
+    * - in v5.x must be 2
+    * - in v6.x must be 3
+    * - in v7.x must be 4
+    * etc.
+    */
+  val MaxSupportedScriptVersion: Byte = V7SoftForkVersion // supported versions 0 through 4
 
   private val _defaultContext = VersionContext(
     activatedVersion = 1 /* v4.x */,

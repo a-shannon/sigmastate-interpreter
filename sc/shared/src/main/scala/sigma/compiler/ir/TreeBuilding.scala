@@ -391,6 +391,12 @@ trait TreeBuilding extends Base { IR: IRContext =>
         SigmaAnd(Seq(p1.asSigmaProp, p2.asSigmaProp))
       case SigmaM.or_sigma_||(In(p1), In(p2)) =>
         SigmaOr(Seq(p1.asSigmaProp, p2.asSigmaProp))
+      case SigmaM.propBytesWithVersion(In(prop), In(version)) =>
+        builder.mkMethodCall(
+          prop.asSigmaProp,
+          SSigmaPropMethods.PropBytesMethodV2,
+          IndexedSeq(version.asByteValue),
+          Map())
       case SigmaM.propBytes(In(prop)) =>
         mkSigmaPropBytes(prop.asSigmaProp)
 

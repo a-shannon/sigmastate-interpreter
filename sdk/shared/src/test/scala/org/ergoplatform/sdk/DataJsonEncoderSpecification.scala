@@ -2,6 +2,7 @@ package org.ergoplatform.sdk
 
 
 import java.math.BigInteger
+import io.circe.Json
 import org.scalacheck.Arbitrary._
 import org.scalacheck.Gen
 import sigma.data.{CAnyValue, RType, SigmaBoolean, TupleColl}
@@ -13,7 +14,7 @@ import sigma.serialization.SerializerException
 import sigma.util.Extensions.{BigIntegerOps, EcpOps, SigmaBooleanOps}
 import sigma.Extensions.ArrayOps
 import sigma.eval.SigmaDsl
-import sigma.{AvlTree, Box, Colls, Evaluation, Header, VersionContext}
+import sigma.{AvlTree, Box, Colls, Evaluation, Header, MerkleTree, VersionContext}
 import sigma.serialization.SerializationSpecification
 
 import scala.annotation.nowarn
@@ -119,6 +120,24 @@ class DataJsonEncoderSpecification extends SerializationSpecification {
     testTuples(SOption[SLong.type])
     forAll { t: SPredefType => testCollection(t) }
     forAll { t: SPredefType => testTuples(t) }
+  }
+
+  property("MerkleTree Data JSON serialization round trip") {
+    forAll { x: MerkleTree =>
+      roundtrip[SMerkleTree.type](x, SMerkleTree, Some(VersionContext.V7SoftForkVersion))
+    }
+  }
+
+  property("MerkleTree Data JSON rejects non-canonical digest lengths") {
+    forAll { x: MerkleTree =>
+      VersionContext.withVersions(VersionContext.V7SoftForkVersion, VersionContext.V7SoftForkVersion) {
+        val encoded = DataJsonEncoder.encodeData[SMerkleTree.type](x, SMerkleTree).asString.get
+        Seq(encoded + "00", encoded.dropRight(2)).foreach { malformed =>
+          an[SerializerException] should be thrownBy
+            DataJsonEncoder.decodeData(Json.fromString(malformed), SMerkleTree)
+        }
+      }
+    }
   }
 
   property("Example test") {

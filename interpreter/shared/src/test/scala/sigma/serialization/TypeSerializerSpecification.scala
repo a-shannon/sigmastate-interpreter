@@ -2,6 +2,7 @@ package sigma.serialization
 
 import org.scalacheck.Arbitrary._
 import org.scalatest.Assertion
+import sigma.VersionContext
 import sigma.ast._
 import sigmastate.CrossVersionProps
 
@@ -92,6 +93,17 @@ class TypeSerializerSpecification extends SerializationSpecification with CrossV
 
     roundtrip(STuple(SLong, SLong, SByte, SBoolean, SInt),
       Array[Byte](TupleTypeCode, 5, SLong.typeCode, SLong.typeCode, SByte.typeCode, SBoolean.typeCode, SInt.typeCode))
+  }
+
+  property("SMerkleTree type serialization is available only in script v4") {
+    VersionContext.withVersions(VersionContext.V7SoftForkVersion, VersionContext.V7SoftForkVersion) {
+      roundtrip(SMerkleTree, Array[Byte](SMerkleTree.typeCode))
+    }
+
+    VersionContext.withVersions(VersionContext.V6SoftForkVersion, VersionContext.V6SoftForkVersion) {
+      an[SerializerException] should be thrownBy
+        SigmaSerializer.startWriter().putType(SMerkleTree)
+    }
   }
 
   property("STypeIdent serialization roundtrip") {

@@ -55,7 +55,7 @@ object DataValueComparer {
 
   /** Dedicated descriptor (not EQ_AvlTree) so AvlTree re-tuning never silently
     * re-tunes MerkleTree and cost traces stay readable. Placeholder values: one field
-    * (digest) to compare instead of AvlTree's four — re-tune against benchmarks. */
+    * (digest) to compare instead of AvlTree's four; re-tune against benchmarks. */
   final val CostKind_EQ_MerkleTree = FixedCost(JitCost(3 + (2 * CostOf_MatchType) / 2))
   final val OpDesc_EQ_MerkleTree = NamedDesc("EQ_MerkleTree")
   final val EQ_MerkleTree = OperationCostInfo(CostKind_EQ_MerkleTree, OpDesc_EQ_MerkleTree)

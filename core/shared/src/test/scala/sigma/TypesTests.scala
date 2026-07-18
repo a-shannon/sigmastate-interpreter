@@ -2,6 +2,7 @@ package sigma
 
 import sigma.data.RType._
 import sigma.data.RType
+import sigma.reflection.RClass
 
 class TypesTests extends BaseTests {
 
@@ -21,5 +22,12 @@ class TypesTests extends BaseTests {
     def tuple2 = tupleRType(Array(RType[Long], RType[Int]))
     assert(tuple != tuple2, "compare two different types")
 
+  }
+
+  test("MerkleTree exposes cross-platform reflection metadata") {
+    val cls = RClass(classOf[MerkleTree])
+
+    cls.getMethod("digest").getName shouldBe "digest"
+    cls.getMethod("updateDigest", classOf[Coll[_]]).getName shouldBe "updateDigest"
   }
 }

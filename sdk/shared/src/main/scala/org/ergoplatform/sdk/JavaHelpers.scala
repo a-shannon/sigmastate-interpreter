@@ -323,6 +323,8 @@ object JavaHelpers {
 
   def AvlTreeRType: RType[sigma.AvlTree] = sigma.AvlTreeRType
 
+  def MerkleTreeRType: RType[sigma.MerkleTree] = sigma.MerkleTreeRType
+
   def BoxRType: RType[sigma.Box] = sigma.BoxRType
 
   def SigmaDsl: CSigmaDslBuilder = sigma.eval.SigmaDsl

@@ -140,7 +140,12 @@ abstract class LanguageSpecificationBase extends SigmaDslTesting
   /** Helper method to create the given expected results for all tree versions. */
   def expectedSuccessForAllTreeVersions[A](value: A, cost: Int, costDetails: CostDetails) = {
     val res = ExpectedResult(Success(value), Some(cost)) -> Some(costDetails)
-    Seq(0, 1, 2, 3).map(version => version -> res)
+    val expectedVersionCount = VersionContext.MaxSupportedScriptVersion.toInt + 1
+    val results = (0 until expectedVersionCount).map(version => version -> res)
+    require(
+      results.length == expectedVersionCount,
+      s"Expected one result per supported ErgoTree version: $expectedVersionCount, got ${results.length}")
+    results
   }
 
 }

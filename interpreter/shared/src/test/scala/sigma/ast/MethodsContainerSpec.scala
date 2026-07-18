@@ -12,18 +12,19 @@ import sigma.VersionContext
   * goes through `java.lang.reflect`; on JS it goes through the hand-written
   * `sigma.reflection` registry. A missing registry entry throws
   * `NoSuchMethodException` the first time the enclosing `lazy val SMethod` is
-  * forced — which can be deep in serializer-spec land instead of here.
+  * forced, which can be deep in serializer-spec land instead of here.
   *
   * Forcing `container.methods` under every supported `(activatedVersion,
-  * ergoTreeVersion)` combination — including the forward-declared
-  * [[VersionContext.V7SoftForkVersion]] which sits above
-  * `MaxSupportedScriptVersion` — triggers every per-version lazy method table,
+  * ergoTreeVersion)` combination through
+  * [[VersionContext.V7SoftForkVersion]] triggers every per-version lazy method table,
   * surfacing missing registry entries here rather than in a downstream consumer.
   */
 class MethodsContainerSpec extends AnyPropSpec with Matchers {
 
-  // Range covers V5/V6 era (within MaxSupportedScriptVersion) plus the V7
-  // forward-declared version, which CrossVersionProps doesn't reach yet.
+  private val reflection = sigmastate.InterpreterReflection
+
+  // Range covers every script version through V7 explicitly so this test remains
+  // independent from the default CrossVersionProps matrix.
   private val versions: Seq[Byte] =
     (0 to VersionContext.V7SoftForkVersion).map(_.toByte)
 
@@ -52,6 +53,30 @@ class MethodsContainerSpec extends AnyPropSpec with Matchers {
           }
         }
       }
+    }
+  }
+
+  property("MerkleTree methods resolve their cross-platform handlers") {
+    reflection should not be null
+
+    VersionContext.withVersions(
+      VersionContext.V7SoftForkVersion,
+      VersionContext.V7SoftForkVersion) {
+      SMerkleTreeMethods.digestMethod.javaMethod.getName shouldBe "digest"
+      SMerkleTreeMethods.updateDigestMethod.javaMethod.getName shouldBe "updateDigest"
+      SMerkleTreeMethods.containsLeafMethod.evalMethod.getName shouldBe "containsLeaf_eval"
+      SMerkleTreeMethods.containsLeavesMethod.evalMethod.getName shouldBe "containsLeaves_eval"
+    }
+  }
+
+  property("SigmaProp.propBytesV2 resolves its cross-platform handlers") {
+    reflection should not be null
+
+    VersionContext.withVersions(
+      VersionContext.V7SoftForkVersion,
+      VersionContext.V7SoftForkVersion) {
+      SSigmaPropMethods.PropBytesMethodV2.javaMethod.getName shouldBe "propBytes"
+      SSigmaPropMethods.PropBytesMethodV2.evalMethod.getName shouldBe "propBytesV2_eval"
     }
   }
 }

@@ -93,6 +93,9 @@ object Value extends js.Object {
     case sigma.AvlTreeRType =>
       val t = data.asInstanceOf[AvlTree]
       AvlTree.isoAvlTree.to(t)
+    case sigma.MerkleTreeRType =>
+      val t = data.asInstanceOf[MerkleTree]
+      MerkleTree.isoMerkleTree.to(t)
     case sigma.BoxRType =>
       val t = data.asInstanceOf[Box]
       CBox(Box.isoBox.to(t.box))
@@ -134,6 +137,8 @@ object Value extends js.Object {
       new SigmaProp(value.asInstanceOf[CSigmaProp].wrappedValue)
     case sigma.AvlTreeRType =>
       AvlTree.isoAvlTree.from(value.asInstanceOf[CAvlTree])
+    case sigma.MerkleTreeRType =>
+      MerkleTree.isoMerkleTree.from(value.asInstanceOf[sigma.MerkleTree])
     case sigma.BoxRType =>
       val fleetBox = Box.isoBox.from(value.asInstanceOf[CBox].wrappedValue)
       new Box(fleetBox)
@@ -170,6 +175,10 @@ object Value extends js.Object {
       data.asInstanceOf[GroupElement]
     case sigma.SigmaPropRType =>
       data.asInstanceOf[SigmaProp]
+    case sigma.MerkleTreeRType =>
+      val tree = data.asInstanceOf[MerkleTree]
+      MerkleTree.isoMerkleTree.to(tree)
+      tree
     case PairType(l, r) => data match {
       case arr: js.Array[Any @unchecked] =>
         checkJsData(arr(0), l)

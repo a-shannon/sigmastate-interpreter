@@ -36,6 +36,7 @@ trait Types extends Core {
     "BigInt"  -> SBigInt,
     "UnsignedBigInt"  -> SUnsignedBigInt, // added in 6.0, but put in this map
     "AvlTree" -> SAvlTree,
+    "MerkleTree" -> SMerkleTree,
     "Context" -> SContext,
     "GroupElement" -> SGroupElement,
     "SigmaProp"   -> SSigmaProp,

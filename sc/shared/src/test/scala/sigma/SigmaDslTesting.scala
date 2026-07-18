@@ -56,6 +56,7 @@ class SigmaDslTesting extends AnyPropSpec
 
   protected val ActivationByScriptVersion: Byte = 0.toByte
   protected val ActivationByTreeVersion: Byte   = 1.toByte
+  protected val V7CostVectorSize: Int = VersionContext.V7SoftForkVersion + 1
 
   lazy val spec: ContractSpec = TestContractSpec(suite)(new TestingIRContext)
 
@@ -1073,29 +1074,36 @@ class SigmaDslTesting extends AnyPropSpec
         }
       }
 
-    /** Used when the old and new value and costs are the same for all versions, but Version 3 (Ergo 6.0) will have a different cost due to deserialization cost being added.
-     * Different versions of ErgoTree can have different deserialization costs as well
+    /** Used when the old and new value and costs are the same for all versions, but
+     * Version 3+ uses costs that include deserialization.
+     * Different ErgoTree versions can have different deserialization costs.
      *
      * @param value           expected result of tested function
      * @param cost            expected verification cost
-     * @param expectedDetails expected cost details for all versions <= V3
-     * @param expectedNewCost expected new verification cost for all versions <= V3
-     * @param expectedV3Cost expected cost for >=V3
+     * @param expectedDetails expected cost details for all versions
+     * @param expectedNewCost expected new verification cost before V6 costing is active
+     * @param expectedV3Costs one verification cost per supported ErgoTree version when V6 costing is active
      */
     def apply[A](value: Try[A],
                  cost: Int,
                  expectedDetails: CostDetails,
                  expectedNewCost: Int,
                  expectedV3Costs: Seq[Int]
-                 )(implicit dummy: DummyImplicit): Expected[A] =
+                 )(implicit dummy: DummyImplicit): Expected[A] = {
+      val expectedVersionCount = VersionContext.MaxSupportedScriptVersion + 1
+      require(
+        expectedV3Costs.length == expectedVersionCount,
+        s"Expected one V6 cost per supported ErgoTree version: $expectedVersionCount, got ${expectedV3Costs.length}"
+      )
       new Expected(ExpectedResult(value, Some(cost))) {
         override val newResults = defaultNewResults.zipWithIndex.map {
           case ((ExpectedResult(v, _), _), version) => {
-            var cost = if (activatedVersionInTests >= V6SoftForkVersion) expectedV3Costs(version) else expectedNewCost
+            val cost = if (activatedVersionInTests >= V6SoftForkVersion) expectedV3Costs(version) else expectedNewCost
             (ExpectedResult(v, Some(cost)), Some(expectedDetails))
           }
         }
       }
+    }
 
     /** Used when operation semantics changes in new versions. For those versions expected
       * test vectors can be specified.

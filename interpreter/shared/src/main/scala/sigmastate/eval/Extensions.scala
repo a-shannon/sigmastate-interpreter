@@ -159,4 +159,12 @@ object Extensions {
       }
     }
   }
+
+  implicit class MerkleTreeOps(val tree: MerkleTree) extends AnyVal {
+    def containsLeaf(leaf: Coll[Byte], proof: Coll[Byte]): Boolean =
+      CMerkleTreeVerifier(tree, proof).containsLeaf(leaf)
+
+    def containsLeaves(leaves: Coll[Coll[Byte]], proof: Coll[Byte]): Boolean =
+      CMerkleTreeVerifier(tree, proof).containsLeaves(leaves)
+  }
 }

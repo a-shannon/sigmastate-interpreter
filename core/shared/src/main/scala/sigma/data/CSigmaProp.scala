@@ -28,6 +28,10 @@ case class CSigmaProp(sigmaTree: SigmaBoolean) extends SigmaProp with WrapperOf[
   }
 
   override def propBytes(version: Byte): Coll[Byte] = {
+    require(
+      version >= 0 && version <= 7,
+      s"ErgoTree version should be in 0..7: $version"
+    )
     val w = CoreSerializer.startWriter()
     if (version == 0) {
       w.put(0)

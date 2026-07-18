@@ -10,12 +10,14 @@ import sigma.crypto.CryptoConstants.dlogGroup
 import sigma.crypto.CryptoFacade
 import sigma.serialization.ConstantSerializer
 import sigmastate.utils.Helpers
-import sigma.SigmaTestingData
-import sigma.data.{CSigmaProp, ProveDlog}
+import sigma.{Colls, SigmaTestingData, VersionContext}
+import sigma.VersionContext.V7SoftForkVersion
+import sigma.data.{CMerkleTree, CSigmaProp, MerkleTreeData, ProveDlog}
 import sigma.ast.js.isoValueToConstant
-import sigma.js.Value
+import sigma.js.{MerkleTree, Type, Value}
 
 import java.math.BigInteger
+import scala.scalajs.js
 
 class ValueSpec extends AnyPropSpec with Matchers with SigmaTestingData with ScalaCheckPropertyChecks {
 
@@ -59,6 +61,30 @@ class ValueSpec extends AnyPropSpec with Matchers with SigmaTestingData with Sca
 
   property("AvlTree toHex()/fromHex()") {
     test(AvlTreeConstant(TestData.t3), "643100d2e101ff01fc047c7f6f00ff80129df69a5090012f01ffca99f5bfff0c803601800100")
+  }
+
+  property("MerkleTree toHex()/fromHex()") {
+    val digest = Array.fill[Byte](MerkleTreeData.DigestSize)(0.toByte)
+    val constant = MerkleTreeConstant(
+      CMerkleTree(MerkleTreeData(Colls.fromArray(digest))))
+
+    VersionContext.withVersions(V7SoftForkVersion, V7SoftForkVersion) {
+      Type.MerkleTree.rtype shouldBe sigma.MerkleTreeRType
+      test(constant, "6b" + "00" * MerkleTreeData.DigestSize)
+    }
+  }
+
+  property("MerkleTree Value conversions reject a non-32-byte digest") {
+    val invalidTree = new MerkleTree("00" * (MerkleTreeData.DigestSize - 1))
+
+    VersionContext.withVersions(V7SoftForkVersion, V7SoftForkVersion) {
+      an[IllegalArgumentException] should be thrownBy {
+        new Value(invalidTree, Type.MerkleTree).runtimeData
+      }
+      an[IllegalArgumentException] should be thrownBy {
+        Value.collOf(js.Array[Any](invalidTree), Type.MerkleTree)
+      }
+    }
   }
 
   // TODO turn on when Value.fromHex is implemented for Box

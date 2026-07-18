@@ -1441,10 +1441,10 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
       constants = Vector(TrueSigmaProp),
       ConstantPlaceholder(0, SSigmaProp))
 
-    // tree with one segregated constant and max supported version
+    // tree with one segregated constant and the version that introduced this behavior
     val t2 = ErgoTree(
       header = ErgoTree.setConstantSegregation(
-        ErgoTree.headerWithVersion(ZeroHeader, VersionContext.MaxSupportedScriptVersion)
+        ErgoTree.headerWithVersion(ZeroHeader, VersionContext.V6SoftForkVersion)
       ),
       Vector(TrueSigmaProp),
       ConstantPlaceholder(0, SSigmaProp))
@@ -1484,7 +1484,8 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
             0 -> (ExpectedResult(Success(expectedTreeBytes_beforeV6), Some(2015)) -> Some(costDetails(1))),
             1 -> (ExpectedResult(Success(expectedTreeBytes_beforeV6), Some(2015)) -> Some(costDetails(1))),
             2 -> (ExpectedResult(Success(expectedTreeBytes_beforeV6), Some(2015)) -> Some(costDetails(1))),
-            3 -> (ExpectedResult(Success(expectedTreeBytes_V6), Some(2065)) -> Some(costDetails(1)))
+            3 -> (ExpectedResult(Success(expectedTreeBytes_V6), Some(2065)) -> Some(costDetails(1))),
+            4 -> (ExpectedResult(Success(expectedTreeBytes_V6), Some(2065)) -> Some(costDetails(1)))
           )
         )
       ),
@@ -1940,7 +1941,8 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
               0 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
               1 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
               2 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
-              3 -> (ExpectedResult(Success(2L), Some(2015)) -> Some(trace))
+              3 -> (ExpectedResult(Success(2L), Some(2015)) -> Some(trace)),
+              4 -> (ExpectedResult(Success(2L), Some(2015)) -> Some(trace))
             )
           } ),
         None -> Expected(Failure(new java.lang.ArithmeticException("/ by zero")), 6, trace, 1793)
@@ -1995,7 +1997,8 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
               0 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
               1 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
               2 -> (ExpectedResult(Failure(new java.lang.ArithmeticException("/ by zero")), Some(2029)) -> Some(trace)),
-              3 -> (ExpectedResult(Success(1), Some(2029)) -> Some(trace))
+              3 -> (ExpectedResult(Success(1), Some(2029)) -> Some(trace)),
+              4 -> (ExpectedResult(Success(1), Some(2029)) -> Some(trace))
             )
           } ),
         Coll[Int]() -> Expected(Failure(new java.lang.ArithmeticException("/ by zero")), 6, trace, 1793)
@@ -3078,7 +3081,7 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
         val input = (preInsertTree, (kvs, insertProof))
         val (res, _) = insert.checkEquality(input).getOrThrow
         res.isDefined shouldBe true
-        insert.checkExpected(input, Expected(Success(res), 1796, costDetails2, 1796, Seq.fill(4)(2102)))
+        insert.checkExpected(input, Expected(Success(res), 1796, costDetails2, 1796, Seq.fill(V7CostVectorSize)(2102)))
       }
 
       { // negative: readonly tree
@@ -3086,7 +3089,7 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
         val input = (readonlyTree, (kvs, insertProof))
         val (res, _) = insert.checkEquality(input).getOrThrow
         res.isDefined shouldBe false
-        insert.checkExpected(input, Expected(Success(res), 1772, costDetails1, 1772, Seq.fill(4)(2078)))
+        insert.checkExpected(input, Expected(Success(res), 1772, costDetails1, 1772, Seq.fill(V7CostVectorSize)(2078)))
       }
 
       { // positive: invalid key, but proof is enough to validate insert
@@ -3096,7 +3099,7 @@ class LanguageSpecificationV6 extends LanguageSpecificationBase { suite =>
         val input = (tree, (kvs, insertProof))
         val (res, _) = insert.checkEquality(input).getOrThrow
         res.isDefined shouldBe true
-        insert.checkExpected(input, Expected(Success(res), 1796, costDetails2, 1796, Seq.fill(4)(2102)))
+        insert.checkExpected(input, Expected(Success(res), 1796, costDetails2, 1796, Seq.fill(V7CostVectorSize)(2102)))
       }
 
       { // nagative: duplicate keys

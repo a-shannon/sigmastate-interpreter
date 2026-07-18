@@ -29,6 +29,20 @@ class MerkleTreeSpecification extends SerializationSpecification {
     }
   }
 
+  property("MerkleTreeData rejects non-32-byte digests on every construction path") {
+    val validDigest = Colls.fromArray(Array.fill[Byte](MerkleTreeData.DigestSize)(0.toByte))
+    val data = MerkleTreeData(validDigest)
+    val tree = CMerkleTree(data)
+
+    Seq(MerkleTreeData.DigestSize - 1, MerkleTreeData.DigestSize + 1).foreach { length =>
+      val invalidDigest = Colls.fromArray(Array.fill[Byte](length)(0.toByte))
+
+      an[IllegalArgumentException] should be thrownBy MerkleTreeData(invalidDigest)
+      an[IllegalArgumentException] should be thrownBy data.copy(digest = invalidDigest)
+      an[IllegalArgumentException] should be thrownBy tree.updateDigest(invalidDigest)
+    }
+  }
+
   property("MerkleTreeConstant serialization roundtrip under v7") {
     forAll(digestGen) { digestBytes =>
       val tree = CMerkleTree(MerkleTreeData(Colls.fromArray(digestBytes)))

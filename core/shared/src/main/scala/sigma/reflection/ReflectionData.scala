@@ -280,6 +280,19 @@ object ReflectionData {
     )
   }
   {
+    val clazz = classOf[MerkleTree]
+    registerClassEntry(clazz,
+      methods = Map(
+        mkMethod(clazz, "digest", Array[Class[_]]()) { (obj, _) =>
+          obj.asInstanceOf[MerkleTree].digest
+        },
+        mkMethod(clazz, "updateDigest", Array[Class[_]](classOf[Coll[_]])) { (obj, args) =>
+          obj.asInstanceOf[MerkleTree].updateDigest(args(0).asInstanceOf[Coll[Byte]])
+        }
+      )
+    )
+  }
+  {
     val clazz = classOf[Box]
     registerClassEntry(clazz,
       methods = Map(

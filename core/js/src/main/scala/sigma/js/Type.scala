@@ -50,6 +50,9 @@ object Type extends js.Object {
   /** Descriptor of ErgoScript type AvlTree. */
   val AvlTree = new Type(sigma.AvlTreeRType)
 
+  /** Descriptor of ErgoScript type MerkleTree. */
+  val MerkleTree = new Type(sigma.MerkleTreeRType)
+
   /** Descriptor of ErgoScript type Context. */
   val Context = new Type(sigma.ContextRType)
 

@@ -6,9 +6,9 @@ import org.ergoplatform.sdk.ExtendedInputBox
 import org.ergoplatform.sdk.wallet.protocol.context.BlockchainStateContext
 import org.scalacheck.Arbitrary
 import sigma.ast.{Constant, SType}
-import sigma.data.Iso
+import sigma.data.{Iso, MerkleTreeData}
 import sigma.interpreter.{ContextExtension, ProverResult}
-import sigma.js.AvlTree
+import sigma.js.{AvlTree, MerkleTree}
 import sigma.{Coll, GroupElement}
 import sigma.data.js.{Isos => DataIsos}
 
@@ -51,6 +51,21 @@ class IsosSpec extends IsosSpecBase with sdk.generators.ObjectGenerators {
   property("Iso.avlTree") {
     forAll { (c: sigma.AvlTree) =>
       roundtrip(AvlTree.isoAvlTree)(c)
+    }
+  }
+
+  property("Iso.merkleTree") {
+    forAll { (c: sigma.MerkleTree) =>
+      roundtrip(MerkleTree.isoMerkleTree)(c)
+    }
+  }
+
+  property("Iso.merkleTree rejects non-32-byte digests") {
+    Seq(MerkleTreeData.DigestSize - 1, MerkleTreeData.DigestSize + 1).foreach { length =>
+      val invalidTree = new MerkleTree("00" * length)
+      an[IllegalArgumentException] should be thrownBy {
+        MerkleTree.isoMerkleTree.to(invalidTree)
+      }
     }
   }
 

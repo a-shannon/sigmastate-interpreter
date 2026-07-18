@@ -133,6 +133,10 @@ object DataJsonEncoder {
       val w = SigmaSerializer.startWriter()
       DataSerializer.serialize(v, tpe, w)
       encodeBytes(w.toBytes)
+    case SMerkleTree =>
+      val w = SigmaSerializer.startWriter()
+      DataSerializer.serialize(v, tpe, w)
+      encodeBytes(w.toBytes)
     case SSigmaProp =>
       val w = SigmaSerializer.startWriter()
       DataSerializer.serialize(v, tpe, w)
@@ -208,6 +212,18 @@ object DataJsonEncoder {
         val str = decodeBytes(json)
         val r = SigmaSerializer.startReader(str)
         DataSerializer.deserialize(SAvlTree, r)
+      case SMerkleTree =>
+        val str = decodeBytes(json)
+        if (str.length != sigma.data.MerkleTreeData.DigestSize) {
+          throw new SerializerException(
+            s"MerkleTree data must contain exactly ${sigma.data.MerkleTreeData.DigestSize} bytes, got ${str.length}")
+        }
+        val r = SigmaSerializer.startReader(str)
+        val tree = DataSerializer.deserialize(SMerkleTree, r)
+        if (r.remaining != 0) {
+          throw new SerializerException(s"Unexpected trailing bytes in MerkleTree data: ${r.remaining}")
+        }
+        tree
       case SSigmaProp =>
         val str = decodeBytes(json)
         val r = SigmaSerializer.startReader(str)

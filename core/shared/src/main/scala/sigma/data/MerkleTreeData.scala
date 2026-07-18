@@ -14,7 +14,11 @@ import sigma.{Coll, Colls, crypto}
   *
   * @param digest root hash of the tree (exactly `crypto.hashLength` bytes).
   */
-case class MerkleTreeData(digest: Coll[Byte])
+case class MerkleTreeData(digest: Coll[Byte]) {
+  require(
+    digest.length == MerkleTreeData.DigestSize,
+    s"Merkle tree digest must be exactly ${MerkleTreeData.DigestSize} bytes, got ${digest.length}")
+}
 
 object MerkleTreeData {
   /** Size of the root digest in bytes. */

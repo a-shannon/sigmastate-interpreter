@@ -33,39 +33,33 @@ class CMerkleTreeVerifier private (
     *         reconstructs to the root digest.
     */
   def containsLeaf(leafData: Coll[Byte]): Boolean = {
-    parsedProof.fold(
-      _ => false,
-      bmp => {
-        val expectedHash = leafHash(leafData)
-        val claimsThisLeaf =
-          bmp.indices.length == 1 &&
-            java.util.Arrays.equals(bmp.indices.head._2, expectedHash)
-        claimsThisLeaf && Try(bmp.valid(Digest32 @@ rootDigest)).getOrElse(false)
-      }
-    )
+    parsedProof.map { bmp =>
+      val expectedHash = leafHash(leafData)
+      val claimsThisLeaf =
+        bmp.indices.length == 1 &&
+          java.util.Arrays.equals(bmp.indices.head._2, expectedHash)
+      claimsThisLeaf && Try(bmp.valid(Digest32 @@ rootDigest)).getOrElse(false)
+    }.getOrElse(false)
   }
 
   /** Verify batch membership.
     *
-    * @param leaves raw leaf bytes for each element. Order is irrelevant — the verifier
+    * @param leaves raw leaf bytes for each element. Order is irrelevant; the verifier
     *               only requires set-equality between the supplied leaves' hashes and
     *               the proof's claimed leaf hashes.
     * @return true iff the proof is well-formed, claims exactly these leaves, and
     *         reconstructs to the root digest.
     */
   def containsLeaves(leaves: Coll[Coll[Byte]]): Boolean = {
-    parsedProof.fold(
-      _ => false,
-      bmp => {
-        if (bmp.indices.length != leaves.length) {
-          false
-        } else {
-          val claimedHashes = bmp.indices.map(_._2.toSeq).toSet
-          val expectedHashes = (0 until leaves.length).map(i => leafHash(leaves(i)).toSeq).toSet
-          claimedHashes == expectedHashes && Try(bmp.valid(Digest32 @@ rootDigest)).getOrElse(false)
-        }
+    parsedProof.map { bmp =>
+      if (bmp.indices.length != leaves.length) {
+        false
+      } else {
+        val claimedHashes = bmp.indices.map(_._2.toSeq).toSet
+        val expectedHashes = (0 until leaves.length).map(i => leafHash(leaves(i)).toSeq).toSet
+        claimedHashes == expectedHashes && Try(bmp.valid(Digest32 @@ rootDigest)).getOrElse(false)
       }
-    )
+    }.getOrElse(false)
   }
 
   private def leafHash(data: Coll[Byte]): Array[Byte] =
@@ -73,7 +67,7 @@ class CMerkleTreeVerifier private (
 }
 
 object CMerkleTreeVerifier {
-  /** scrypto serializer pinned to Blake2b256/Digest32 — the only hash function used by
+  /** scrypto serializer pinned to Blake2b256/Digest32, the only hash function used by
     * Ergo's Merkle constructions. */
   private val proofSerializer = new BatchMerkleProofSerializer[Digest32, Blake2b256.type]()(Blake2b256)
 

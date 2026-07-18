@@ -199,6 +199,11 @@ case class ContractTemplate(
 }
 
 object ContractTemplate {
+  private def withCodecVersion[T](treeVersion: Option[Byte])(block: => T): T = {
+    val version = treeVersion.getOrElse(sigma.VersionContext.JitActivationVersion)
+    sigma.VersionContext.withVersions(version, version)(block)
+  }
+
   def apply(name: String,
             description: String,
             constTypes: IndexedSeq[SType],
@@ -227,101 +232,98 @@ object ContractTemplate {
 
     override def serialize(data: ContractTemplate, w: SigmaByteWriter): Unit = {
       w.putOption(data.treeVersion)(_.putUByte(_))
-      serializeString(data.name, w)
-      serializeString(data.description, w)
+      withCodecVersion(data.treeVersion) {
+        serializeString(data.name, w)
+        serializeString(data.description, w)
 
-      val nConstants = data.constTypes.length
-      w.putUInt(nConstants)
-      cfor(0)(_ < nConstants, _ + 1) { i =>
-        TypeSerializer.serialize(data.constTypes(i), w)
-      }
-      w.putOption(data.constValues)((_, values) => {
+        val nConstants = data.constTypes.length
+        w.putUInt(nConstants)
         cfor(0)(_ < nConstants, _ + 1) { i =>
-          w.putOption(values(i))((_, const) =>
-            DataSerializer.serialize(const, data.constTypes(i), w))
+          TypeSerializer.serialize(data.constTypes(i), w)
         }
-      })
+        w.putOption(data.constValues)((_, values) => {
+          cfor(0)(_ < nConstants, _ + 1) { i =>
+            w.putOption(values(i))((_, const) =>
+              DataSerializer.serialize(const, data.constTypes(i), w))
+          }
+        })
 
-      val nParameters = data.parameters.length
-      w.putUInt(nParameters)
-      cfor(0)(_ < nParameters, _ + 1) { i =>
-        Parameter.serializer.serialize(data.parameters(i), w)
+        val nParameters = data.parameters.length
+        w.putUInt(nParameters)
+        cfor(0)(_ < nParameters, _ + 1) { i =>
+          Parameter.serializer.serialize(data.parameters(i), w)
+        }
+
+        val expressionTreeWriter = SigmaSerializer.startWriter()
+        ValueSerializer.serialize(data.expressionTree, expressionTreeWriter)
+        val expressionBytes = expressionTreeWriter.toBytes
+        w.putUInt(expressionBytes.length)
+        w.putBytes(expressionBytes)
       }
-
-      val expressionTreeWriter = SigmaSerializer.startWriter()
-      ValueSerializer.serialize(data.expressionTree, expressionTreeWriter)
-      val expressionBytes = expressionTreeWriter.toBytes
-      w.putUInt(expressionBytes.length)
-      w.putBytes(expressionBytes)
     }
 
     override def parse(r: SigmaByteReader): ContractTemplate = {
       val treeVersion = r.getOption(r.getUByte().toByte)
-      val name = parseString(r)
-      val description = parseString(r)
+      withCodecVersion(treeVersion) {
+        val name = parseString(r)
+        val description = parseString(r)
 
-      val nConstants = r.getUInt().toInt
-      val constTypes: IndexedSeq[SType] = {
-        if (nConstants > 0) {
-          val res = safeNewArray[SType](nConstants)
-          cfor(0)(_ < nConstants, _ + 1) { i =>
-            res(i) = TypeSerializer.deserialize(r)
+        val nConstants = r.getUInt().toInt
+        val constTypes: IndexedSeq[SType] = {
+          if (nConstants > 0) {
+            val res = safeNewArray[SType](nConstants)
+            cfor(0)(_ < nConstants, _ + 1) { i =>
+              res(i) = TypeSerializer.deserialize(r)
+            }
+            res
+          } else {
+            SType.EmptySeq
           }
-          res
-        } else {
-          SType.EmptySeq
         }
-      }
-      val constValues: Option[IndexedSeq[Option[SType#WrappedType]]] = r.getOption {
-        if (nConstants > 0) {
-          val res = safeNewArray[Option[SType#WrappedType]](nConstants)
-          cfor(0)(_ < nConstants, _ + 1) { i =>
-            res(i) = r.getOption((() => DataSerializer.deserialize(constTypes(i), r))())
+        val constValues: Option[IndexedSeq[Option[SType#WrappedType]]] = r.getOption {
+          if (nConstants > 0) {
+            val res = safeNewArray[Option[SType#WrappedType]](nConstants)
+            cfor(0)(_ < nConstants, _ + 1) { i =>
+              res(i) = r.getOption((() => DataSerializer.deserialize(constTypes(i), r))())
+            }
+            res
+          } else {
+            Array.empty[Option[SType#WrappedType]]
           }
-          res
-        } else {
-          Array.empty[Option[SType#WrappedType]]
         }
-      }
 
-      val nParameters = r.getUInt().toInt
-      val parameters: IndexedSeq[Parameter] = {
-        if (nParameters > 0) {
-          val res = safeNewArray[Parameter](nParameters)
-          cfor(0)(_ < nParameters, _ + 1) { i =>
-            res(i) = Parameter.serializer.parse(r)
+        val nParameters = r.getUInt().toInt
+        val parameters: IndexedSeq[Parameter] = {
+          if (nParameters > 0) {
+            val res = safeNewArray[Parameter](nParameters)
+            cfor(0)(_ < nParameters, _ + 1) { i =>
+              res(i) = Parameter.serializer.parse(r)
+            }
+            res
+          } else {
+            Parameter.EmptySeq
           }
-          res
-        } else {
-          Parameter.EmptySeq
         }
-      }
 
-      // Populate constants in constantStore so that the expressionTree can be deserialized.
-      val constants = constTypes.indices.map(i => {
-        val t = constTypes(i)
-        DeserializationSigmaBuilder.mkConstant(Zero.zeroOf(Zero.typeToZero(Evaluation.stypeToRType(t))), t)
-      })
-      constants.foreach(c => r.constantStore.put(c)(DeserializationSigmaBuilder))
+        // Populate constants in constantStore so that the expressionTree can be deserialized.
+        val constants = constTypes.indices.map(i => {
+          val t = constTypes(i)
+          DeserializationSigmaBuilder.mkConstant(Zero.zeroOf(Zero.typeToZero(Evaluation.stypeToRType(t))), t)
+        })
+        constants.foreach(c => r.constantStore.put(c)(DeserializationSigmaBuilder))
 
-      val _ = r.getUInt().toInt
-      // Use the template's treeVersion for deserialization context so that
-      // version-gated methods (e.g. serialize in v6) are recognized.
-      // Falls back to JitActivationVersion when treeVersion is not specified,
-      // which is conservative — v6 templates must set treeVersion explicitly.
-      val deserVersion = treeVersion.getOrElse(sigma.VersionContext.JitActivationVersion)
-      val expressionTree = sigma.VersionContext.withVersions(deserVersion, deserVersion) {
-        ValueSerializer.deserialize(r)
-      }
-      if (!expressionTree.tpe.isSigmaProp) {
-        throw SerializerException(
-          s"Failed deserialization, expected deserialized script to have type SigmaProp; got ${expressionTree.tpe}")
-      }
+        val _ = r.getUInt().toInt
+        val expressionTree = ValueSerializer.deserialize(r)
+        if (!expressionTree.tpe.isSigmaProp) {
+          throw SerializerException(
+            s"Failed deserialization, expected deserialized script to have type SigmaProp; got ${expressionTree.tpe}")
+        }
 
-      ContractTemplate(
-        treeVersion, name, description,
-        constTypes, constValues, parameters,
-        expressionTree.toSigmaProp)
+        ContractTemplate(
+          treeVersion, name, description,
+          constTypes, constValues, parameters,
+          expressionTree.toSigmaProp)
+      }
     }
   }
 
@@ -344,75 +346,75 @@ object ContractTemplate {
 
     /** Json encoder for ContractTemplate */
     implicit val encoder: Encoder[ContractTemplate] = Encoder.instance({ ct =>
-      val expressionTreeWriter = SigmaSerializer.startWriter()
-      ValueSerializer.serialize(ct.expressionTree, expressionTreeWriter)
+      withCodecVersion(ct.treeVersion) {
+        val expressionTreeWriter = SigmaSerializer.startWriter()
+        ValueSerializer.serialize(ct.expressionTree, expressionTreeWriter)
 
-      Json.obj(
-        "treeVersion" -> ct.treeVersion.asJson,
-        "name" -> Json.fromString(ct.name),
-        "description" -> Json.fromString(ct.description),
-        "constTypes" -> ct.constTypes.asJson,
-        "constValues" -> (
-          if (ct.constValues.isEmpty) Json.Null
-          else ct.constValues.get.indices.map(i => ct.constValues.get(i) match {
-            case Some(const) => DataJsonEncoder.encodeData(const, ct.constTypes(i))
-            case None => Json.Null
-          }).asJson),
-        "parameters" -> ct.parameters.asJson,
-        "expressionTree" -> expressionTreeWriter.toBytes.asJson
-      )
+        Json.obj(
+          "treeVersion" -> ct.treeVersion.asJson,
+          "name" -> Json.fromString(ct.name),
+          "description" -> Json.fromString(ct.description),
+          "constTypes" -> ct.constTypes.asJson,
+          "constValues" -> (
+            if (ct.constValues.isEmpty) Json.Null
+            else ct.constValues.get.indices.map(i => ct.constValues.get(i) match {
+              case Some(const) => DataJsonEncoder.encodeData(const, ct.constTypes(i))
+              case None => Json.Null
+            }).asJson),
+          "parameters" -> ct.parameters.asJson,
+          "expressionTree" -> expressionTreeWriter.toBytes.asJson
+        )
+      }
     })
 
     /** Json decoder for ContractTemplate */
     implicit val decoder: Decoder[ContractTemplate] = Decoder.instance({ implicit cursor =>
-      val constTypesResult = cursor.downField("constTypes").as[IndexedSeq[SType]]
-      val expressionTreeBytesResult = cursor.downField("expressionTree").as[Array[Byte]]
-      (constTypesResult, expressionTreeBytesResult) match {
-        case (Right(constTypes), Right(expressionTreeBytes)) =>
-          val constValuesOpt = {
-            val constValuesJson = cursor.downField("constValues").focus.get
-            if (constValuesJson != Json.Null) {
-              val jsonValues = constValuesJson.asArray.get
-              Some(jsonValues.indices.map(
-                i => if (jsonValues(i) == Json.Null) None
-                else Some(DataJsonEncoder.decodeData(jsonValues(i), constTypes(i)))))
-            } else {
-              None
+      cursor.downField("treeVersion").as[Option[Byte]].flatMap { treeVersion =>
+        fromThrows {
+          withCodecVersion(treeVersion) {
+            val constTypesResult = cursor.downField("constTypes").as[IndexedSeq[SType]]
+            val expressionTreeBytesResult = cursor.downField("expressionTree").as[Array[Byte]]
+            (constTypesResult, expressionTreeBytesResult) match {
+              case (Right(constTypes), Right(expressionTreeBytes)) =>
+                val constValuesOpt = {
+                  val constValuesJson = cursor.downField("constValues").focus.get
+                  if (constValuesJson != Json.Null) {
+                    val jsonValues = constValuesJson.asArray.get
+                    Some(jsonValues.indices.map(
+                      i => if (jsonValues(i) == Json.Null) None
+                      else Some(DataJsonEncoder.decodeData(jsonValues(i), constTypes(i)))))
+                  } else {
+                    None
+                  }
+                }
+
+                // Populate synthetic constants in the constant store for deserialization of expression tree.
+                val r = SigmaSerializer.startReader(expressionTreeBytes)
+                val constants = constTypes.indices.map(i => {
+                  val t = constTypes(i)
+                  DeserializationSigmaBuilder.mkConstant(Zero.zeroOf(Zero.typeToZero(Evaluation.stypeToRType(t))), t)
+                })
+                constants.foreach(c => r.constantStore.put(c)(DeserializationSigmaBuilder))
+
+                for {
+                  name <- cursor.downField("name").as[String]
+                  description <- cursor.downField("description").as[String]
+                  parameters <- cursor.downField("parameters").as[IndexedSeq[Parameter]]
+                } yield {
+                  val expressionTree = ValueSerializer.deserialize(r)
+                  new ContractTemplate(
+                    treeVersion,
+                    name,
+                    description,
+                    constTypes,
+                    constValuesOpt,
+                    parameters,
+                    expressionTree.toSigmaProp)
+                }
+              case _ => Left(DecodingFailure("Failed to decode contract template", cursor.history))
             }
           }
-
-          // Populate synthetic constants in the constant store for deserialization of expression tree.
-          val r = SigmaSerializer.startReader(expressionTreeBytes)
-          val constants = constTypes.indices.map(i => {
-            val t = constTypes(i)
-            DeserializationSigmaBuilder.mkConstant(Zero.zeroOf(Zero.typeToZero(Evaluation.stypeToRType(t))), t)
-          })
-          constants.foreach(c => r.constantStore.put(c)(DeserializationSigmaBuilder))
-
-          for {
-            treeVersion <- cursor.downField("treeVersion").as[Option[Byte]]
-            name <- cursor.downField("name").as[String]
-            description <- cursor.downField("description").as[String]
-            parameters <- cursor.downField("parameters").as[IndexedSeq[Parameter]]
-          } yield {
-            // Use the template's treeVersion for deserialization context so that
-            // version-gated methods (e.g. serialize in v6) are recognized.
-            // Falls back to JitActivationVersion when treeVersion is not specified,
-            // which is conservative — v6 templates must set treeVersion explicitly.
-            val deserVersion = treeVersion.getOrElse(sigma.VersionContext.JitActivationVersion)
-            val expressionTree = sigma.VersionContext.withVersions(deserVersion, deserVersion) {
-              ValueSerializer.deserialize(r)
-            }
-            new ContractTemplate(
-              treeVersion,
-              name,
-              description,
-              constTypes,
-              constValuesOpt,
-              parameters,
-              expressionTree.toSigmaProp)
-          }
-        case _ => Left(DecodingFailure("Failed to decode contract template", cursor.history))
+        }.flatMap(identity)
       }
     })
   }

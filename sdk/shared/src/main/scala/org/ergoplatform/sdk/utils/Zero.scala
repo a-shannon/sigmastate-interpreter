@@ -1,7 +1,7 @@
 package org.ergoplatform.sdk.utils
 
 import org.ergoplatform.ErgoBox
-import sigma.data.{AvlTreeData, AvlTreeFlags, CAvlTree, CBigInt, CGroupElement, CSigmaProp, CUnsignedBigInt, CollType, FuncType, OptionType, PairType, RType, TrivialProp, TupleType}
+import sigma.data.{AvlTreeData, AvlTreeFlags, CAvlTree, CBigInt, CGroupElement, CMerkleTree, CSigmaProp, CUnsignedBigInt, CollType, FuncType, MerkleTreeData, OptionType, PairType, RType, TrivialProp, TupleType}
 import sigma.data.RType._
 import scorex.crypto.authds.avltree.batch.BatchAVLProver
 import scorex.crypto.hash.{Blake2b256, Digest32}
@@ -57,6 +57,7 @@ object Zero extends ZeroLowPriority {
     val treeData = new AvlTreeData(Colls.fromArray(digest), AvlTreeFlags.AllOperationsAllowed, 32, None)
     CAvlTree(treeData)
   })
+  implicit val MerkleTreeIsZero: Zero[MerkleTree] = CZero(CMerkleTree(MerkleTreeData.dummy))
   implicit val sigmaPropIsZero: Zero[SigmaProp] = CZero(CSigmaProp(TrivialProp.FalseProp))
   implicit val UnitIsZero: Zero[Unit] = CZero(())
   implicit val BoxIsZero: Zero[Box] = CZero({
@@ -94,6 +95,7 @@ object Zero extends ZeroLowPriority {
     case BoxRType => Zero[Box]
     case GroupElementRType => Zero[GroupElement]
     case AvlTreeRType => Zero[AvlTree]
+    case MerkleTreeRType => Zero[MerkleTree]
     case SigmaPropRType => sigmaPropIsZero
     case ct: CollType[a] => collIsZero(typeToZero(ct.tItem), ct.tItem)
     case ct: OptionType[a] => optionIsZero(typeToZero(ct.tA))

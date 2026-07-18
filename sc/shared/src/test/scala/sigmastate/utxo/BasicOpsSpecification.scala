@@ -68,7 +68,8 @@ class BasicOpsSpecification extends CompilerTestingCommons
   val propVar2 = 11.toByte
   val propVar3 = 12.toByte
   val propBytesVar1 = 13.toByte
-  val lastExtVar = propBytesVar1
+  val propBytesV4Var1 = 14.toByte
+  val lastExtVar = propBytesV4Var1
 
   val ext: Seq[VarBinding] = Seq(
     (intVar1, IntConstant(1)), (intVar2, IntConstant(2)),
@@ -98,12 +99,14 @@ class BasicOpsSpecification extends CompilerTestingCommons
         val p1 = dlogSecrets(0).publicImage
         val p2 = dlogSecrets(1).publicImage
         val d1 = dhSecrets(0).publicImage
+        val p3 = CSigmaProp(CAND(Seq(p1, d1)))
 
         (ext ++ Seq(
           propVar1 -> SigmaPropConstant(p1),
           propVar2 -> SigmaPropConstant(p2),
-          propVar3 -> SigmaPropConstant(CSigmaProp(CAND(Seq(p1, d1)))),
-          propBytesVar1 -> ByteArrayConstant(CSigmaProp(CAND(Seq(p1, d1))).propBytes)
+          propVar3 -> SigmaPropConstant(p3),
+          propBytesVar1 -> ByteArrayConstant(p3.propBytes),
+          propBytesV4Var1 -> ByteArrayConstant(p3.propBytes(V7SoftForkVersion))
         )).toMap
       }
       override val evalSettings: EvalSettings = DefaultEvalSettings.copy(
@@ -1173,7 +1176,7 @@ class BasicOpsSpecification extends CompilerTestingCommons
   /**
     * 64-bit production Bulletproof range proof verification.
     *
-    * Proves v ∈ [0, 2^64) — full production-grade range proof.
+    * Proves v ∈ [0, 2^64), a full production-grade range proof.
     * Uses 6 rounds of inner product argument (log2(64) = 6).
     * Measures actual on-chain JitCost via isMeasureOperationTime.
     */
@@ -3325,23 +3328,51 @@ $lrFoldScript
     }
   }
 
-  // propBytesV2(0) at the source level should be byte-identical to the no-arg propBytes.
-  // The framework iterates only up to MaxSupportedScriptVersion (=3) so the positive branch
-  // is currently unreachable; the if/else auto-promotes once MaxSupportedScriptVersion bumps.
-  property("propBytesV2 - propBytes correspondence") {
-    def runTest() = test("propBytesV2", env, ext,
+  property("propBytesV2 evaluates versioned bytes through MethodCall") {
+    def runTest(outputVersion: Byte, expectedBytesVar: Byte) =
+      test(s"propBytesV2_$outputVersion", env, ext,
       s"""{
-            val p1 = getVar[SigmaProp]($propVar1).get
-            p1.propBytesV2(0.toByte) == p1.propBytes
+            val p = getVar[SigmaProp]($propVar3).get
+            val expected = getVar[Coll[Byte]]($expectedBytesVar).get
+            p.propBytesV2($outputVersion.toByte) == expected
           }""",
       null,
       true
     )
 
     if (ergoTreeVersionInTests < V7SoftForkVersion) {
-      an [Exception] should be thrownBy runTest()
+      an [sigma.validation.ValidationException] should be thrownBy
+        runTest(0.toByte, propBytesVar1)
     } else {
-      runTest()
+      runTest(0.toByte, propBytesVar1)
+      runTest(V7SoftForkVersion, propBytesV4Var1)
+    }
+  }
+
+  property("propBytesV2 rejects invalid output versions during evaluation") {
+    if (ergoTreeVersionInTests == V7SoftForkVersion) {
+      def runTest(outputVersion: Byte) =
+        test(s"propBytesV2_invalid_$outputVersion", env, ext,
+          s"""{
+                val p = getVar[SigmaProp]($propVar3).get
+                val expected = getVar[Coll[Byte]]($propBytesVar1).get
+                p.propBytesV2($outputVersion.toByte) == expected
+              }""",
+          null,
+          true
+        )
+
+      Seq((-1).toByte, 8.toByte).foreach { outputVersion =>
+        val error = intercept[Throwable] {
+          runTest(outputVersion)
+        }
+        val messages = Iterator.iterate(error)(_.getCause)
+          .take(8)
+          .takeWhile(_ != null)
+          .flatMap(t => Option(t.getMessage))
+          .mkString(" | ")
+        messages should include("ErgoTree version should be in 0..7")
+      }
     }
   }
 

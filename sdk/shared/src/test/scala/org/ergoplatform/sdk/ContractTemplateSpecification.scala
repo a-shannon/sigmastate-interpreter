@@ -1,9 +1,11 @@
 package org.ergoplatform.sdk
 
+import io.circe.Json
 import org.ergoplatform.sdk.generators.ObjectGenerators
 import org.scalatest.compatible.Assertion
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 import sigma.ast._
+import sigma.data.{CMerkleTree, MerkleTreeData}
 import sigmastate._
 import sigmastate.helpers.NegativeTesting
 import sigma.serialization.{SerializationSpecification, SigmaSerializer}
@@ -357,6 +359,78 @@ class ContractTemplateSpecification extends SerializationSpecification
 
       serializationRoundTrip(template)
       template.treeVersion shouldBe versionOpt
+    }
+  }
+
+  private def merkleTreeTemplate(treeVersion: Option[Byte]): ContractTemplate = {
+    VersionContext.withVersions(VersionContext.V7SoftForkVersion, VersionContext.V7SoftForkVersion) {
+      val digest = Colls.fromArray(Array.tabulate[Byte](MerkleTreeData.DigestSize)(_.toByte))
+      val tree = CMerkleTree(MerkleTreeData(digest))
+      val placeholder = ConstantPlaceholder(0, SMerkleTree)
+      val treeDigest = MethodCall(
+        placeholder,
+        SMerkleTreeMethods.digestMethod,
+        Vector.empty,
+        Map.empty
+      )
+
+      ContractTemplate(
+        treeVersion = treeVersion,
+        name = "MerkleTreeContract",
+        description = "Contract with a MerkleTree default value and method call",
+        constTypes = IndexedSeq(SMerkleTree),
+        constValues = Some(
+          IndexedSeq(Some(tree)).asInstanceOf[IndexedSeq[Option[SType#WrappedType]]]
+        ),
+        parameters = Parameter.EmptySeq,
+        expressionTree = EQ(treeDigest, ByteArrayConstant(digest.toArray)).toSigmaProp
+      )
+    }
+  }
+
+  property("ContractTemplate codecs use the declared v4 for MerkleTree data and expressions") {
+    val template = merkleTreeTemplate(Some(VersionContext.V7SoftForkVersion))
+
+    VersionContext.withVersions(VersionContext.JitActivationVersion, VersionContext.JitActivationVersion) {
+      serializationRoundTrip(template)
+      jsonRoundTrip(template)
+    }
+  }
+
+  property("ContractTemplate codecs reject v4 MerkleTree payloads declared as v3 or unversioned") {
+    val validTemplate = merkleTreeTemplate(Some(VersionContext.V7SoftForkVersion))
+    val writer = SigmaSerializer.startWriter()
+    ContractTemplate.serializer.serialize(validTemplate, writer)
+    val validBytes = writer.toBytes
+    val validJson = ContractTemplate.jsonEncoder.encoder(validTemplate)
+
+    Seq(Some(VersionContext.V6SoftForkVersion), None).foreach { treeVersion =>
+      val template = merkleTreeTemplate(treeVersion)
+
+      VersionContext.withVersions(VersionContext.V7SoftForkVersion, VersionContext.V7SoftForkVersion) {
+        an[Exception] should be thrownBy {
+          val w = SigmaSerializer.startWriter()
+          ContractTemplate.serializer.serialize(template, w)
+        }
+        an[Exception] should be thrownBy ContractTemplate.jsonEncoder.encoder(template)
+      }
+
+      val declaredBytes = treeVersion match {
+        case Some(version) =>
+          val bytes = validBytes.clone()
+          bytes(1) = version
+          bytes
+        case None =>
+          Array(0.toByte) ++ validBytes.drop(2)
+      }
+      an[Exception] should be thrownBy {
+        ContractTemplate.serializer.parse(SigmaSerializer.startReader(declaredBytes))
+      }
+
+      val declaredJson = validJson.mapObject(_.add(
+        "treeVersion",
+        treeVersion.fold[Json](Json.Null)(version => Json.fromInt(version))))
+      ContractTemplate.jsonEncoder.decoder(declaredJson.hcursor).isLeft shouldBe true
     }
   }
 }

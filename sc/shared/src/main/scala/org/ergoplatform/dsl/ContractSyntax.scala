@@ -61,6 +61,7 @@ trait ContractSyntax { contract: SigmaContract =>
       case _: Box => BoxRType
       case _: AvlTreeData => syntax.AvlTreeDataRType // TODO remove this RType
       case _: AvlTree => AvlTreeRType
+      case _: MerkleTree => MerkleTreeRType
       case _: SigmaBoolean => SigmaBooleanRType // TODO remove this RType
       case _: SigmaProp => SigmaPropRType
       case _: Context => ContextRType

@@ -594,7 +594,7 @@ trait AvlTree {
 
 /** Static (unauthenticated) Merkle tree, introduced in v7.0.
   *
-  * Unlike [[AvlTree]], a `MerkleTree` doesn't support insertions/updates/removals — it
+  * Unlike [[AvlTree]], a `MerkleTree` doesn't support insertions/updates/removals; it
   * stores only the root digest. Membership of one or more leaves is verified against
   * that digest by ErgoTree method calls (`containsLeaf`, `containsLeaves`) which
   * accept a proof produced by the sender. The proof byte format matches

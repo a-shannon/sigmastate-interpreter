@@ -245,6 +245,16 @@ class ErgoTreeSerializerSpecification extends SerializationSpecification
     }
   }
 
+  property("SigmaProp.propBytes(version) rejects versions outside the ErgoTree header range") {
+    val prop = CSigmaProp(true)
+    Seq(Byte.MinValue, (-1).toByte, 8.toByte, Byte.MaxValue).foreach { version =>
+      val error = intercept[IllegalArgumentException] {
+        prop.propBytes(version)
+      }
+      error.getMessage should include("ErgoTree version should be in 0..7")
+    }
+  }
+
   property("SigmaProp.propBytes (no-arg) == SigmaProp.propBytes(0)") {
     forAll(MinSuccessful(100)) { sp: SigmaProp =>
       sp.propBytes.toArray shouldBe sp.propBytes(0.toByte).toArray

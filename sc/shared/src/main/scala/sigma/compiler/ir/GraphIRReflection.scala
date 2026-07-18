@@ -86,6 +86,9 @@ object GraphIRReflection {
         mkMethod(clazz, "propBytes", Array[Class[_]]()) { (obj, _) =>
           obj.asInstanceOf[ctx.SigmaProp].propBytes
         },
+        mkMethod(clazz, "propBytes", Array[Class[_]](classOf[Base#Ref[_]])) { (obj, args) =>
+          obj.asInstanceOf[ctx.SigmaProp].propBytes(args(0).asInstanceOf[ctx.Ref[Byte]])
+        },
         mkMethod(clazz, "$amp$amp", Array[Class[_]](classOf[Base#Ref[_]])) { (obj, args) =>
           obj.asInstanceOf[ctx.SigmaProp].$amp$amp(args(0).asInstanceOf[ctx.Ref[ctx.SigmaProp]])
         }

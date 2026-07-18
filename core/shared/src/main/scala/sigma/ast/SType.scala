@@ -959,7 +959,7 @@ case object SGlobal extends SProduct with SPredefType with SMonoType {
 /** Type descriptor of `MerkleTree` type of ErgoTree.
   *
   * Static (unauthenticated) Merkle tree introduced in v7.0. Unlike [[SAvlTree]] this
-  * type represents a tree that doesn't support insertions/updates/removals — only
+  * type represents a tree that doesn't support insertions/updates/removals; only
   * membership-proof verification against a fixed root digest. See issue
   * https://github.com/ergoplatform/sigmastate-interpreter/issues/296 for motivation.
   */

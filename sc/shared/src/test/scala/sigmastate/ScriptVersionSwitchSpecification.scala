@@ -35,6 +35,10 @@ class ScriptVersionSwitchSpecification extends SigmaDslTesting {
 
   implicit def IR: IRContext = createIR()
 
+  property("this release fully supports script version 4") {
+    MaxSupportedScriptVersion shouldBe sigma.VersionContext.V7SoftForkVersion
+  }
+
   lazy val b1 = CBox(
     new ErgoBox(
       1L,
@@ -271,31 +275,46 @@ class ScriptVersionSwitchSpecification extends SigmaDslTesting {
     }
   }
 
-  /** Rule#| BlockVer | Block Type| Script Version | Release | Validation Action
-    * -----|----------|-----------|----------------|---------|--------
-    * 19   | 5        | candidate | Script v4      | v6.0    | skip-accept (rely on majority)
-    * 20   | 5        | mined     | Script v4      | v6.0    | skip-accept (rely on majority)
+  /** Script v4 rollout and the fallback required by a future script v5 activation.
+    *
+    * Activated | Script | Validation action in this release
+    * ----------|--------|----------------------------------
+    * 4         | 4      | full verification
+    * 4         | 5      | reject before activation
+    * 5         | 4      | full verification of the known version
+    * 5         | 5      | verifier fallback for the unknown version
     */
-  property("Rules 19,20 | Block v5 | candidate or mined block | Script v4") {
-    forEachActivatedScriptVersion(activatedVers = Array[Byte](4)) // activated version is greater than MaxSupported
-    {
-      forEachErgoTreeVersion(ergoTreeVers = Array[Byte](4, 5)) { // tree version >= activated
-        val headerFlags = ErgoTree.defaultHeaderWithVersion(ergoTreeVersionInTests)
-        val ergoTree = createErgoTree(headerFlags)
+  property("Script v4 activation and future script v5 fallback") {
+    val scriptV4 = createErgoTree(ErgoTree.defaultHeaderWithVersion(4))
 
-        // prover is rejecting, because it cannot generate proofs for ErgoTrees with version
-        // higher than max supported by the interpreter
-        assertExceptionThrown(
-          testProve(ergoTree, activatedScriptVersion = activatedVersionInTests),
-          exceptionLike[InterpreterException](s"Both ErgoTree version ${ergoTree.version} and activated version $activatedVersionInTests is greater than MaxSupportedScriptVersion $MaxSupportedScriptVersion")
-        )
+    val proofAtV4 = testProve(scriptV4, activatedScriptVersion = 4)
+    proofAtV4.proof shouldBe Array.emptyByteArray
+    proofAtV4.cost shouldBe 24L
+    testVerify(scriptV4, activatedScriptVersion = 4) shouldBe (true -> 24L)
 
-        // and verify is accepting without evaluation
-        val (ok, cost) = testVerify(ergoTree, activatedScriptVersion = activatedVersionInTests)
-        ok shouldBe true
-        cost shouldBe 0L
-      }
-    }
+    val scriptV5 = createErgoTree(ErgoTree.defaultHeaderWithVersion(5))
+    val notActivatedMessage = "ErgoTree version 5 is higher than activated 4"
+    assertExceptionThrown(
+      testProve(scriptV5, activatedScriptVersion = 4),
+      exceptionLike[InterpreterException](notActivatedMessage)
+    )
+    assertExceptionThrown(
+      testVerify(scriptV5, activatedScriptVersion = 4),
+      exceptionLike[InterpreterException](notActivatedMessage)
+    )
+
+    val proofAtFutureV5 = testProve(scriptV4, activatedScriptVersion = 5)
+    proofAtFutureV5.proof shouldBe Array.emptyByteArray
+    proofAtFutureV5.cost shouldBe 24L
+    testVerify(scriptV4, activatedScriptVersion = 5) shouldBe (true -> 24L)
+
+    assertExceptionThrown(
+      testProve(scriptV5, activatedScriptVersion = 5),
+      exceptionLike[InterpreterException](
+        "Both ErgoTree version 5 and activated version 5 is greater than " +
+          "MaxSupportedScriptVersion 4")
+    )
+    testVerify(scriptV5, activatedScriptVersion = 5) shouldBe (true -> 0L)
   }
 
   /** Rule#| BlockVer | Block Type| Script Version  | Release | Validation Action

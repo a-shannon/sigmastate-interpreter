@@ -461,7 +461,7 @@ case class TaggedVariableNode[T <: SType](varId: Byte, override val tpe: T)
 
 /** Companion object for [[TaggedVariable]].
   *
-  * NOTE: this object is intentionally NOT deprecated — it must stay reachable
+  * NOTE: this object is intentionally NOT deprecated; it must stay reachable
   * because the serializer dispatch table looks up `opCode` on it. Only the
   * `apply` constructor is marked deprecated to discourage new producers of
   * `TaggedVariableNode` while keeping the parse path intact.

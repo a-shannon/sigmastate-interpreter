@@ -16,7 +16,7 @@ import sigma.data.ExactIntegral.{ByteIsExactIntegral, IntIsExactIntegral, LongIs
 import sigma.data.NumericOps.BigIntIsExactIntegral
 import sigma.data.OverloadHack.Overloaded1
 import sigma.data.UnsignedBigIntNumericOps.UnsignedBigIntIsExactIntegral
-import sigma.data.{CBigInt, CUnsignedBigInt, DataValueComparer, KeyValueColl, Nullable, RType, SigmaConstants}
+import sigma.data.{CBigInt, CSigmaProp, CUnsignedBigInt, DataValueComparer, KeyValueColl, Nullable, RType, SigmaConstants}
 import sigma.eval.{CostDetails, ErgoTreeEvaluator, TracedCost}
 import sigma.pow.Autolykos2PowValidation
 import sigma.reflection.RClass
@@ -742,6 +742,17 @@ case object SSigmaPropMethods extends MonoTypeMethods {
     .withInfo(MethodCall,
       "Serialized bytes of this sigma proposition as ErgoTree of the given version.",
       ArgInfo("version", "ErgoTree version (0..7) to embed in the output header."))
+
+  /** Implements evaluation of SigmaProp.propBytes(version) with the same per-node
+    * costing used by the legacy no-argument operation.
+    */
+  def propBytesV2_eval(mc: MethodCall, prop: SigmaProp, version: Byte)
+                      (implicit E: ErgoTreeEvaluator): Coll[Byte] = {
+    val numNodes = prop.asInstanceOf[CSigmaProp].wrappedValue.size
+    E.addSeqCost(mc.method.costKind.asInstanceOf[PerItemCost], numNodes, mc.method.opDesc) { () =>
+      prop.propBytes(version)
+    }
+  }
 
   private lazy val commonMethods = super.getMethods() ++ Seq(
     PropBytesMethod, IsProvenMethod
@@ -1782,7 +1793,7 @@ case object SAvlTreeMethods extends MonoTypeMethods {
   * (scrypto wire format) supplied as a `Coll[Byte]` argument to [[containsLeafMethod]]
   * or [[containsLeavesMethod]].
   *
-  * All methods are gated by [[VersionContext.isV4OrLaterErgoTreeVersion]] — they
+  * All methods are gated by [[VersionContext.isV4OrLaterErgoTreeVersion]]; they
   * disappear under v5/v6 contexts so the v7 soft-fork is the only path through which
   * scripts can call them.
   */

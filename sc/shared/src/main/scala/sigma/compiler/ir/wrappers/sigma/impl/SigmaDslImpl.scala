@@ -719,7 +719,7 @@ object SigmaProp extends EntityObject("SigmaProp") {
 
     override def propBytes(version: Ref[Byte]): Ref[Coll[Byte]] = {
       asRep[Coll[Byte]](mkMethodCall(self,
-        SigmaPropClass.getMethod("propBytes", classOf[Byte]),
+        SigmaPropClass.getMethod("propBytes", classOf[Sym]),
         Array[AnyRef](version),
         true, false, element[Coll[Byte]]))
     }
@@ -773,7 +773,7 @@ object SigmaProp extends EntityObject("SigmaProp") {
 
     def propBytes(version: Ref[Byte]): Ref[Coll[Byte]] = {
       asRep[Coll[Byte]](mkMethodCall(source,
-        SigmaPropClass.getMethod("propBytes", classOf[Byte]),
+        SigmaPropClass.getMethod("propBytes", classOf[Sym]),
         Array[AnyRef](version),
         true, true, element[Coll[Byte]]))
     }
@@ -829,12 +829,22 @@ object SigmaProp extends EntityObject("SigmaProp") {
 
     object propBytes {
       def unapply(d: Def[_]): Nullable[Ref[SigmaProp]] = d match {
-        case MethodCall(receiver, method, _, _) if method.getName == "propBytes" && receiver.elem.isInstanceOf[SigmaPropElem[_]] =>
+        case MethodCall(receiver, method, args, _) if method.getName == "propBytes" && args.isEmpty && receiver.elem.isInstanceOf[SigmaPropElem[_]] =>
           val res = receiver
           Nullable(res).asInstanceOf[Nullable[Ref[SigmaProp]]]
         case _ => Nullable.None
       }
       def unapply(exp: Sym): Nullable[Ref[SigmaProp]] = unapply(exp.node)
+    }
+
+    object propBytesWithVersion {
+      def unapply(d: Def[_]): Nullable[(Ref[SigmaProp], Ref[Byte])] = d match {
+        case MethodCall(receiver, method, args, _) if method.getName == "propBytes" && args.length == 1 && receiver.elem.isInstanceOf[SigmaPropElem[_]] =>
+          val res = (receiver, args(0))
+          Nullable(res).asInstanceOf[Nullable[(Ref[SigmaProp], Ref[Byte])]]
+        case _ => Nullable.None
+      }
+      def unapply(exp: Sym): Nullable[(Ref[SigmaProp], Ref[Byte])] = unapply(exp.node)
     }
 
     object and_sigma_&& {

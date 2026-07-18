@@ -282,6 +282,40 @@ object SigmaDataReflection {
     )
   }
 
+  { val clazz = SMerkleTreeMethods.getClass
+    registerClassEntry(clazz,
+      methods = Map(
+        mkMethod(clazz, "containsLeaf_eval", Array[Class[_]](classOf[MethodCall], classOf[MerkleTree], classOf[Coll[_]], classOf[Coll[_]], classOf[ErgoTreeEvaluator])) { (obj, args) =>
+          obj.asInstanceOf[SMerkleTreeMethods.type].containsLeaf_eval(
+            args(0).asInstanceOf[MethodCall],
+            args(1).asInstanceOf[MerkleTree],
+            args(2).asInstanceOf[Coll[Byte]],
+            args(3).asInstanceOf[Coll[Byte]])(args(4).asInstanceOf[ErgoTreeEvaluator])
+        },
+        mkMethod(clazz, "containsLeaves_eval", Array[Class[_]](classOf[MethodCall], classOf[MerkleTree], classOf[Coll[_]], classOf[Coll[_]], classOf[ErgoTreeEvaluator])) { (obj, args) =>
+          obj.asInstanceOf[SMerkleTreeMethods.type].containsLeaves_eval(
+            args(0).asInstanceOf[MethodCall],
+            args(1).asInstanceOf[MerkleTree],
+            args(2).asInstanceOf[Coll[Coll[Byte]]],
+            args(3).asInstanceOf[Coll[Byte]])(args(4).asInstanceOf[ErgoTreeEvaluator])
+        }
+      )
+    )
+  }
+
+  { val clazz = SSigmaPropMethods.getClass
+    registerClassEntry(clazz,
+      methods = Map(
+        mkMethod(clazz, "propBytesV2_eval", Array[Class[_]](classOf[MethodCall], classOf[SigmaProp], classOf[Byte], classOf[ErgoTreeEvaluator])) { (obj, args) =>
+          obj.asInstanceOf[SSigmaPropMethods.type].propBytesV2_eval(
+            args(0).asInstanceOf[MethodCall],
+            args(1).asInstanceOf[SigmaProp],
+            args(2).asInstanceOf[Byte])(args(3).asInstanceOf[ErgoTreeEvaluator])
+        }
+      )
+    )
+  }
+
   { val clazz = SCollectionMethods.getClass
     registerClassEntry(clazz,
       methods = Map(
