@@ -66,6 +66,21 @@ class StarkVerificationCapabilitySpec extends AnyFunSuite with Matchers {
       Left(RuntimeMetadataRejected(
         "max-application-payload-bytes",
         "must be nonnegative"))
+    active(new TestRuntime(
+      id(1),
+      Array(1),
+      1,
+      MaxApplicationPayloadBytes + 1), 1) shouldBe
+      Left(RuntimeMetadataRejected(
+        "max-application-payload-bytes",
+        s"must not exceed $MaxApplicationPayloadBytes"))
+    right(active(new TestRuntime(
+      id(1),
+      Array(1),
+      1,
+      MaxApplicationPayloadBytes), 1))
+      .lifecycle.asInstanceOf[ActiveLifecycle]
+      .maxApplicationPayloadBytes shouldBe MaxApplicationPayloadBytes
     active(new TestRuntime(Array[Byte](1), Array(1), 1, 0), 1) shouldBe
       Left(WrongDigestLength("runtime-profile-id", ProfileIdBytes, 1))
     active(new TestRuntime(id(1), Array(1), 1, 0), 0) shouldBe

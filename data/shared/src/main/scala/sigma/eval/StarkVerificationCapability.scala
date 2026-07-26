@@ -22,6 +22,9 @@ object StarkVerificationCapability {
   final val ProfileIdBytes: Int = 32
   final val MaxProofChunkBytes: Int = 65535
   final val MaxTransitionEntries: Int = 65535
+  /** V1 arithmetic ceiling; each activated profile may require a lower limit. */
+  final val MaxApplicationPayloadBytes: Int =
+    Risc0ClaimBuilder.MaxApplicationPayloadBytes
 
   /** No applicable transition snapshot exists for this invocation. */
   case object Unavailable extends StarkVerificationCapability
@@ -154,6 +157,10 @@ object StarkVerificationCapability {
       return Left(RuntimeMetadataRejected(
         "max-application-payload-bytes",
         "must be nonnegative"))
+    if (maximum > MaxApplicationPayloadBytes)
+      return Left(RuntimeMetadataRejected(
+        "max-application-payload-bytes",
+        s"must not exceed $MaxApplicationPayloadBytes"))
     val exactProofBytes = runtime.exactProofBytes
     if (exactProofBytes <= 0)
       return Left(RuntimeMetadataRejected("exact-proof-bytes", "must be positive"))

@@ -323,7 +323,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/circuit/PolyExtInterpreter.scala",
-      "sha256": "ceb5e1c3c44d9b347b2412138476c4439b736092faceb5c49ad5c298887291b8",
+      "sha256": "73eb25d97ed9f75fda508b8dd4b3429cfebcbc57f50917289142c151c01f3729",
       "provenance": "adapted",
       "sources": [
         "arkadia:PolyExtInterpreter",
@@ -334,7 +334,8 @@
       "transformations": [
         "Translated PolyExtExecutor's straight-line fp/mix stack semantics to allocation-bounded Scala loops.",
         "Specialized globals and tapped evaluations to the recursion circuit.",
-        "Replaced null, negative, and out-of-range access panics/assertions with Left values, rejected non-canonical BabyBear constants instead of reducing them, and enforced exact post-run census checks."
+        "Replaced null, negative, and out-of-range access panics/assertions with Left values, rejected non-canonical BabyBear constants instead of reducing them, and enforced exact post-run census checks.",
+        "Centralized all ten PolyExt arithmetic cases in one package-bounded kernel shared by the defensive interpreter API and the production verifier after its immutable program validation barrier."
       ]
     },
     {
@@ -382,18 +383,19 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/ErgoStarkStatement.scala",
-      "sha256": "aa22067bc25bbf7f608a899aa9b8d4e7413f38c2f0140fd8e5bf0e39b8d38502",
+      "sha256": "9f2218e4434bf6f70cb9ee0de2983660f2673dd8770519327bb85a63fc32b107",
       "provenance": "original",
       "sources": [],
       "transformations": [
         "Original EIP-0045 ErgoStatementV1 and RISC0 OK ReceiptClaim binding by A. Shannon.",
         "Derives the expected claim only from authenticated profile data, chain domain, program ID, contract ID, and bounded application payload.",
-        "Uses defensive input snapshots, exact little-endian statement framing, tagged-struct SHA-256, and typed host-input rejection."
+        "Uses defensive input snapshots, exact little-endian statement framing, tagged-struct SHA-256, and typed host-input rejection.",
+        "Rejects any configured payload maximum above the largest V1 statement length representable by the verifier's signed-Int framing."
       ]
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/Risc0RawSealVerifier.scala",
-      "sha256": "d94cda1f78e1f469d8af48b63a78040cb8a4eb93a7befdb68505892b14b7064b",
+      "sha256": "52b06c11223f9176965330073d66c117f0848fc011878606de839e18bff4ff23",
       "provenance": "substantially-adapted",
       "sources": [
         "arkadia:SuccinctVerifier",
@@ -409,7 +411,7 @@
         "Retained the stock RISC0 STARK/DEEP-ALI/FRI verification flow from the independent Scala implementation and pinned RISC0 algorithms.",
         "Removed bincode receipt parsing, host receipt wrappers, caller-selected control programs, and generic control-set inclusion.",
         "Added direct fixed raw-seal input, manifest-owned exact control-ID matching, derived segment exponent, late inner-root/claim checks, strict EOF, immutable validated profile snapshots, exact TapSet coverage/distinctness checks, canonical PolyExt constants, fixed circuit/opcode censuses, and typed proof rejection.",
-        "Kept profile construction faults distinct from proof-controlled failures and exposed only bounded checkpoint instrumentation."
+        "Kept profile construction faults distinct from proof-controlled failures, routes the owned validated constraint-program snapshot through the sole PolyExt arithmetic kernel, and exposed only bounded checkpoint instrumentation."
       ]
     }
   ],

@@ -15,6 +15,9 @@ package sigma.stark.profile
 object Risc0ClaimBuilder {
   final val DigestBytes: Int = 32
   final val StatementPrefixBytes: Int = 159
+  /** Largest payload whose complete V1 statement length fits a signed Int. */
+  final val MaxApplicationPayloadBytes: Int =
+    Int.MaxValue - StatementPrefixBytes
   final val StatementVersion: Int = 1
 
   private val StatementDomain = ascii("Ergo.VerifyStark.Statement")
@@ -139,7 +142,8 @@ object Risc0ClaimBuilder {
       case None          => ()
     }
     if (applicationPayload == null) return Left(NullInput("application-payload"))
-    if (maxApplicationPayloadBytes < 0)
+    if (maxApplicationPayloadBytes < 0 ||
+        maxApplicationPayloadBytes > MaxApplicationPayloadBytes)
       return Left(InvalidPayloadMaximum(maxApplicationPayloadBytes))
     if (applicationPayload.length > maxApplicationPayloadBytes)
       return Left(ApplicationPayloadTooLarge(

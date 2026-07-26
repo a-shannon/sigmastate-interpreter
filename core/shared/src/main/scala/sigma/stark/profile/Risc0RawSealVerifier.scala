@@ -10,7 +10,7 @@
 package sigma.stark.profile
 
 import sigma.stark.{BabyBear, Ext4, FriVerifier, MerkleVerifier, Poseidon2, ReadIop}
-import sigma.stark.circuit.{CircuitTapSet, PolyExtOp, PolyExtTable}
+import sigma.stark.circuit.{CircuitTapSet, PolyExtInterpreter, PolyExtOp, PolyExtTable}
 
 /** Direct verifier for the EIP-0045 stock RISC0 raw-seal profile.
   *
@@ -268,10 +268,14 @@ final class Risc0RawSealVerifier private[profile] (
     }
     checkpoint(probe, "eval_u", extArrayWords(evalU))
 
-    val result = runConstraintProgram(p.program, polyMix, evalU, Array(out, mixGlobals)) match {
-      case Left(detail) => invariant("constraint program changed after validation: " + detail)
-      case Right(value) => value
-    }
+    val result = PolyExtInterpreter.runValidated(
+      p.program.ops,
+      p.program.ret,
+      p.program.fpVars,
+      p.program.mixVars,
+      polyMix,
+      evalU,
+      Array(out, mixGlobals)).tot
     checkpoint(probe, "result", extWords(result))
 
     // Four check-polynomial planes, with risc0-zkp's [0,2,1,3] remap.
@@ -950,66 +954,6 @@ object Risc0RawSealVerifier {
   private val Basis1 = Ext4(0, 1, 0, 0)
   private val Basis2 = Ext4(0, 0, 1, 0)
   private val Basis3 = Ext4(0, 0, 0, 1)
-
-  private def runConstraintProgram(
-      table: ProgramSnapshot,
-      polyMix: Ext4,
-      u: Array[Ext4],
-      args: Array[Array[Int]]): Either[String, Ext4] = {
-    val fp = new Array[Ext4](table.fpVars)
-    val mixTotal = new Array[Ext4](table.mixVars)
-    val mixMultiplier = new Array[Ext4](table.mixVars)
-    var fpCount = 0
-    var mixCount = 0
-    var i = 0
-    while (i < table.ops.length) {
-      table.ops(i) match {
-        case PolyExtOp.Const(value) =>
-          fp(fpCount) = Ext4.fromBase(value.toInt)
-          fpCount += 1
-        case PolyExtOp.ConstExt(a, b, c, d) =>
-          fp(fpCount) = Ext4(
-            a.toInt,
-            b.toInt,
-            c.toInt,
-            d.toInt)
-          fpCount += 1
-        case PolyExtOp.Get(tap) =>
-          fp(fpCount) = u(tap)
-          fpCount += 1
-        case PolyExtOp.GetGlobal(arg, offset) =>
-          fp(fpCount) = Ext4.fromBase(args(arg)(offset))
-          fpCount += 1
-        case PolyExtOp.Add(a, b) =>
-          fp(fpCount) = fp(a) + fp(b)
-          fpCount += 1
-        case PolyExtOp.Sub(a, b) =>
-          fp(fpCount) = fp(a) - fp(b)
-          fpCount += 1
-        case PolyExtOp.Mul(a, b) =>
-          fp(fpCount) = fp(a) * fp(b)
-          fpCount += 1
-        case PolyExtOp.True =>
-          mixTotal(mixCount) = Ext4.Zero
-          mixMultiplier(mixCount) = Ext4.One
-          mixCount += 1
-        case PolyExtOp.AndEqz(chain, inner) =>
-          mixTotal(mixCount) = mixTotal(chain) + mixMultiplier(chain) * fp(inner)
-          mixMultiplier(mixCount) = mixMultiplier(chain) * polyMix
-          mixCount += 1
-        case PolyExtOp.AndCond(chain, condition, inner) =>
-          mixTotal(mixCount) = mixTotal(chain) +
-            fp(condition) * mixTotal(inner) * mixMultiplier(chain)
-          mixMultiplier(mixCount) = mixMultiplier(chain) * mixMultiplier(inner)
-          mixCount += 1
-      }
-      i += 1
-    }
-    if (fpCount != table.fpVars || mixCount != table.mixVars)
-      Left("constraint program stack count changed after construction")
-    else
-      Right(mixTotal(table.ret))
-  }
 
   private def validateProtocolInfo(value: String, label: String): Unit = {
     if (value == null || value.length != 16)

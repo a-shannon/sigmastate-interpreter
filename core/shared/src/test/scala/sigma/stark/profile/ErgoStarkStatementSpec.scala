@@ -80,6 +80,15 @@ class ErgoStarkStatementSpec extends BaseTests {
     maximum.statement.length shouldBe 16543
     maximum.statement.slice(155, 159).sameElements(
       Array[Byte](0x00, 0x40, 0x00, 0x00)) shouldBe true
+
+    MaxApplicationPayloadBytes shouldBe Int.MaxValue - StatementPrefixBytes
+    right(build(
+      new Array[Byte](32),
+      new Array[Byte](32),
+      new Array[Byte](32),
+      new Array[Byte](32),
+      Array.empty[Byte],
+      MaxApplicationPayloadBytes)).statement.length shouldBe StatementPrefixBytes
   }
 
   test("manifest-owned payload maximum is enforced before construction") {
@@ -98,6 +107,15 @@ class ErgoStarkStatementSpec extends BaseTests {
       new Array[Byte](32),
       Array.empty[Byte],
       -1)) shouldBe InvalidPayloadMaximum(-1)
+
+    left(build(
+      new Array[Byte](32),
+      new Array[Byte](32),
+      new Array[Byte](32),
+      new Array[Byte](32),
+      Array.empty[Byte],
+      MaxApplicationPayloadBytes + 1)) shouldBe
+      InvalidPayloadMaximum(MaxApplicationPayloadBytes + 1)
 
     left(build(
       new Array[Byte](32),

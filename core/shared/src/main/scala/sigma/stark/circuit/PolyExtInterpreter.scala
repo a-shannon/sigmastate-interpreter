@@ -65,40 +65,38 @@ object PolyExtInterpreter {
     if (table.fpVars < 0 || table.mixVars < 0)
       return Left("constraint table has negative stack dimensions")
 
-    val fp = new Array[Ext4](table.fpVars)
-    val mixTot = new Array[Ext4](table.mixVars)
-    val mixMul = new Array[Ext4](table.mixVars)
+    // Validate every proof-independent operation and proof-dependent access
+    // before entering the shared arithmetic kernel. Production reaches that
+    // same kernel only through Risc0RawSealVerifier.ProgramSnapshot, whose
+    // construction performs these checks while taking an owned copy.
+    val ops = table.ops
     var fpN = 0
     var mixN = 0
 
     var i = 0
-    while (i < table.opsCount) {
-      val op = table.opAt(i)
+    while (i < ops.length) {
+      val op = ops(i)
       if (op == null) return Left(s"op $i is null")
       op match {
         case PolyExtOp.Const(v) =>
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           if (v < 0 || v >= BabyBear.P.toLong)
             return Left(s"op $i: Const value $v is not a canonical BabyBear element")
-          fp(fpN) = Ext4.fromBase(v.toInt)
           fpN += 1
         case PolyExtOp.ConstExt(c0, c1, c2, c3) =>
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           if (c0 < 0 || c0 >= BabyBear.P.toLong ||
               c1 < 0 || c1 >= BabyBear.P.toLong ||
               c2 < 0 || c2 >= BabyBear.P.toLong ||
               c3 < 0 || c3 >= BabyBear.P.toLong)
             return Left(s"op $i: ConstExt contains a non-canonical BabyBear element")
-          fp(fpN) = Ext4(
-            c0.toInt, c1.toInt, c2.toInt, c3.toInt)
           fpN += 1
         case PolyExtOp.Get(tap) =>
           if (tap < 0 || tap >= u.length)
             return Left(s"op $i: Get($tap) outside u (${u.length} taps)")
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           val value = u(tap)
           if (value == null) return Left(s"op $i: Get($tap) resolved to null")
-          fp(fpN) = value
           fpN += 1
         case PolyExtOp.GetGlobal(arg, offset) =>
           if (arg < 0 || arg >= args.length)
@@ -110,46 +108,36 @@ object PolyExtInterpreter {
           val v = buffer(offset)
           if (v < 0 || v >= BabyBear.P)
             return Left(s"op $i: GetGlobal($arg, $offset) value $v not a canonical field element")
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
-          fp(fpN) = Ext4.fromBase(v)
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           fpN += 1
         case PolyExtOp.Add(a, b) =>
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           if (a < 0 || a >= fpN || b < 0 || b >= fpN)
             return Left(s"op $i: Add operands ($a,$b) outside fp stack ($fpN)")
-          fp(fpN) = fp(a) + fp(b)
           fpN += 1
         case PolyExtOp.Sub(a, b) =>
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           if (a < 0 || a >= fpN || b < 0 || b >= fpN)
             return Left(s"op $i: Sub operands ($a,$b) outside fp stack ($fpN)")
-          fp(fpN) = fp(a) - fp(b)
           fpN += 1
         case PolyExtOp.Mul(a, b) =>
-          if (fpN >= fp.length) return Left(s"op $i: fp stack overflow")
+          if (fpN >= table.fpVars) return Left(s"op $i: fp stack overflow")
           if (a < 0 || a >= fpN || b < 0 || b >= fpN)
             return Left(s"op $i: Mul operands ($a,$b) outside fp stack ($fpN)")
-          fp(fpN) = fp(a) * fp(b)
           fpN += 1
         case PolyExtOp.True =>
-          if (mixN >= mixTot.length) return Left(s"op $i: mix stack overflow")
-          mixTot(mixN) = Ext4.Zero
-          mixMul(mixN) = Ext4.One
+          if (mixN >= table.mixVars) return Left(s"op $i: mix stack overflow")
           mixN += 1
         case PolyExtOp.AndEqz(chain, inner) =>
-          if (mixN >= mixTot.length) return Left(s"op $i: mix stack overflow")
+          if (mixN >= table.mixVars) return Left(s"op $i: mix stack overflow")
           if (chain < 0 || chain >= mixN || inner < 0 || inner >= fpN)
             return Left(s"op $i: AndEqz operands ($chain,$inner) outside mix/fp stacks ($mixN,$fpN)")
-          mixTot(mixN) = mixTot(chain) + mixMul(chain) * fp(inner)
-          mixMul(mixN) = mixMul(chain) * polyMix
           mixN += 1
         case PolyExtOp.AndCond(chain, cond, inner) =>
-          if (mixN >= mixTot.length) return Left(s"op $i: mix stack overflow")
+          if (mixN >= table.mixVars) return Left(s"op $i: mix stack overflow")
           if (chain < 0 || chain >= mixN || cond < 0 || cond >= fpN ||
               inner < 0 || inner >= mixN)
             return Left(s"op $i: AndCond operands ($chain,$cond,$inner) outside mix/fp stacks ($mixN,$fpN)")
-          mixTot(mixN) = mixTot(chain) + fp(cond) * mixTot(inner) * mixMul(chain)
-          mixMul(mixN) = mixMul(chain) * mixMul(inner)
           mixN += 1
       }
       i += 1
@@ -163,6 +151,86 @@ object PolyExtInterpreter {
     else if (table.ret < 0 || table.ret >= mixN)
       Left(s"ret ${table.ret} outside mix stack ($mixN)")
     else
-      Right(MixState(mixTot(table.ret), mixMul(table.ret)))
+      Right(runValidated(
+        ops,
+        table.ret,
+        table.fpVars,
+        table.mixVars,
+        polyMix,
+        u,
+        args))
+  }
+
+  /** Execute one already-validated constraint program.
+    *
+    * This is the sole implementation of the ten PolyExt arithmetic cases.
+    * It is package-bounded because callers must first establish that every
+    * stack/global/tap operand and every constant is valid. The production
+    * verifier does so in its immutable `ProgramSnapshot`; [[step]] retains
+    * the defensive public validation contract above.
+    *
+    * Keep this loop's allocation and expression order aligned with
+    * risc0-zkp's `PolyExtExecutor::run`: three preallocated stacks and only
+    * immutable [[Ext4]] arithmetic values inside the loop.
+    */
+  private[stark] def runValidated(
+      ops: Array[PolyExtOp],
+      ret: Int,
+      fpVars: Int,
+      mixVars: Int,
+      polyMix: Ext4,
+      u: Array[Ext4],
+      args: Array[Array[Int]]
+  ): MixState = {
+    val fp = new Array[Ext4](fpVars)
+    val mixTot = new Array[Ext4](mixVars)
+    val mixMul = new Array[Ext4](mixVars)
+    var fpN = 0
+    var mixN = 0
+    var i = 0
+    while (i < ops.length) {
+      ops(i) match {
+        case PolyExtOp.Const(value) =>
+          fp(fpN) = Ext4.fromBase(value.toInt)
+          fpN += 1
+        case PolyExtOp.ConstExt(a, b, c, d) =>
+          fp(fpN) = Ext4(
+            a.toInt,
+            b.toInt,
+            c.toInt,
+            d.toInt)
+          fpN += 1
+        case PolyExtOp.Get(tap) =>
+          fp(fpN) = u(tap)
+          fpN += 1
+        case PolyExtOp.GetGlobal(arg, offset) =>
+          fp(fpN) = Ext4.fromBase(args(arg)(offset))
+          fpN += 1
+        case PolyExtOp.Add(a, b) =>
+          fp(fpN) = fp(a) + fp(b)
+          fpN += 1
+        case PolyExtOp.Sub(a, b) =>
+          fp(fpN) = fp(a) - fp(b)
+          fpN += 1
+        case PolyExtOp.Mul(a, b) =>
+          fp(fpN) = fp(a) * fp(b)
+          fpN += 1
+        case PolyExtOp.True =>
+          mixTot(mixN) = Ext4.Zero
+          mixMul(mixN) = Ext4.One
+          mixN += 1
+        case PolyExtOp.AndEqz(chain, inner) =>
+          mixTot(mixN) = mixTot(chain) + mixMul(chain) * fp(inner)
+          mixMul(mixN) = mixMul(chain) * polyMix
+          mixN += 1
+        case PolyExtOp.AndCond(chain, condition, inner) =>
+          mixTot(mixN) = mixTot(chain) +
+            fp(condition) * mixTot(inner) * mixMul(chain)
+          mixMul(mixN) = mixMul(chain) * mixMul(inner)
+          mixN += 1
+      }
+      i += 1
+    }
+    MixState(mixTot(ret), mixMul(ret))
   }
 }

@@ -9,6 +9,7 @@ import sigma.stark.FriVerifier
 import sigma.stark.circuit.{CircuitTapSet, PolyExtTable}
 import sigma.stark.profile.Risc0RawSealVerifier._
 
+import scala.collection.mutable
 import scala.io.Source
 
 /** End-to-end interoperability tests for the direct EIP-0045 RISC Zero
@@ -126,6 +127,34 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
 
   private lazy val rawSeal = resourceBytes(FixtureRoot + "po2-15-raw-seal.bin")
   private lazy val expectedClaim = resourceBytes(FixtureRoot + "po2-15-claim-digest.bin")
+  private lazy val polyExtOracleSeal =
+    resourceBytes("/stark-kats/eip0045-arkadia-independent/raw-seal.bin")
+  private lazy val polyExtOracleClaim =
+    resourceBytes("/stark-kats/eip0045-arkadia-independent/claim-digest.bin")
+
+  private val PolyExtCheckpointLabels =
+    Set("out", "mix", "poly_mix", "eval_u", "result", "check_value")
+
+  private lazy val polyExtOracle: Map[String, Array[Int]] = {
+    val rows = resourceLines("/stark-kats/polyext_transcript_oracle.tsv").iterator
+      .filter(_.startsWith("ck\t"))
+      .map(_.split("\t", -1))
+      .toArray
+    rows.length shouldBe PolyExtCheckpointLabels.size
+    rows.map(_(1)).toSet shouldBe PolyExtCheckpointLabels
+    rows.iterator.map { fields =>
+      val values = fields.last.split(",", -1)
+        .map(java.lang.Long.parseLong)
+        .map(_.toInt)
+      if (fields(1) == "eval_u") {
+        fields.length shouldBe 4
+        fields(2).toInt shouldBe values.length / 4
+      } else {
+        fields.length shouldBe 3
+      }
+      fields(1) -> values
+    }.toMap
+  }
 
   private def canonicalChunks(bytes: Array[Byte]): Array[Array[Byte]] = {
     require(bytes.length == ChunkLengths.sum, "fixture does not have the canonical raw-seal size")
@@ -144,6 +173,17 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
     var queries: Int = 0
     override def onCheckpoint(label: String, values: Array[Int]): Unit =
       if (label == "query") queries += 1
+  }
+
+  private final class PolyExtCheckpointProbe extends Probe {
+    val captured: mutable.Map[String, Vector[Array[Int]]] = mutable.Map.empty
+
+    override def onCheckpoint(label: String, values: Array[Int]): Unit = {
+      if (PolyExtCheckpointLabels.contains(label)) {
+        val observations = captured.getOrElse(label, Vector.empty)
+        captured.update(label, observations :+ values.clone())
+      }
+    }
   }
 
   test("fixture manifest pins public provenance, exact sizes, and SHA-256 digests") {
@@ -184,6 +224,22 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
     val chunks = canonicalChunks(rawSeal)
     chunks.map(_.length).toSeq shouldBe ChunkLengths.toSeq
     verifier().verify(chunks, expectedClaim) shouldBe Right(Verified(1, 15))
+  }
+
+  test("production verifier reproduces every PolyExt oracle checkpoint exactly once") {
+    val probe = new PolyExtCheckpointProbe
+    verifier().verify(
+      canonicalChunks(polyExtOracleSeal),
+      polyExtOracleClaim,
+      probe) shouldBe Right(Verified(1, 16))
+
+    probe.captured.keySet shouldBe PolyExtCheckpointLabels
+    PolyExtCheckpointLabels.foreach { label =>
+      withClue(label + ": ") {
+        probe.captured(label) should have length 1
+        probe.captured(label).head.toSeq shouldBe polyExtOracle(label).toSeq
+      }
+    }
   }
 
   test("claim mismatch is rejected only after all 50 proof queries") {

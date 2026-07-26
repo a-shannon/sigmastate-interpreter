@@ -15,6 +15,10 @@ import scala.collection.mutable.ArrayBuffer
 class ValueSerializerStructuralSchemaSpec extends AnyPropSpec with Matchers {
 
   private final case class Fixture(name: String, node: Value[SType])
+  private final case class StructuralSchema(
+      name: String,
+      fixtureName: String,
+      opDescs: IndexedSeq[ValueCompanion])
 
   private final class RecordingWriter
     extends SigmaByteWriter(
@@ -165,6 +169,77 @@ class ValueSerializerStructuralSchemaSpec extends AnyPropSpec with Matchers {
   private def serializerFor(node: Value[SType]): ValueSerializer[Value[SType]] =
     ValueSerializer.getSerializer(node.opCode).asInstanceOf[ValueSerializer[Value[SType]]]
 
+  private lazy val fixtureByName: Map[String, Fixture] =
+    fixtures.map(fixture => fixture.name -> fixture).toMap
+
+  /**
+    * One schema entry per direct-Value child order/arity witness. A shared
+    * serializer class may cover several opcode instances only when every
+    * listed opcode is registered with that exact implementation class.
+    */
+  private lazy val structuralSchemas: IndexedSeq[StructuralSchema] = IndexedSeq(
+    StructuralSchema("BlockValueSerializer", "BlockValueSerializer", IndexedSeq(BlockValue)),
+    StructuralSchema("CaseObjectSerialization", "CaseObjectSerialization", IndexedSeq(
+      TrueLeaf, FalseLeaf, Context, Global, Height, MinerPubkey, Inputs, Outputs,
+      LastBlockUtxoRootHash, Self, GroupGenerator)),
+    StructuralSchema("ApplySerializer", "ApplySerializer", IndexedSeq(Apply)),
+    StructuralSchema("BoolToSigmaPropSerializer", "BoolToSigmaPropSerializer", IndexedSeq(BoolToSigmaProp)),
+    StructuralSchema("FuncValueSerializer", "FuncValueSerializer", IndexedSeq(FuncValue)),
+    StructuralSchema("ConcreteCollectionBooleanConstantSerializer", "ConcreteCollectionBooleanConstantSerializer", IndexedSeq(ConcreteCollectionBooleanConstant)),
+    StructuralSchema("ModQArithOpSerializer", "ModQArithOpSerializer", IndexedSeq(
+      ModQArithOp.PlusModQ, ModQArithOp.MinusModQ)),
+    StructuralSchema("MethodCallSerializer", "MethodCallSerializer", IndexedSeq(MethodCall)),
+    StructuralSchema("OneArgumentOperationSerializer", "OneArgumentOperationSerializer", IndexedSeq(Negation, BitInversion)),
+    StructuralSchema("LogicalNotSerializer", "LogicalNotSerializer", IndexedSeq(LogicalNot)),
+    StructuralSchema("ConstantSerializer", "ConstantSerializer", IndexedSeq(Constant)),
+    StructuralSchema("OptionGetOrElseSerializer", "OptionGetOrElseSerializer", IndexedSeq(OptionGetOrElse)),
+    StructuralSchema("ModQSerializer", "ModQSerializer", IndexedSeq(ModQ)),
+    StructuralSchema("CreateProveDlogSerializer", "CreateProveDlogSerializer", IndexedSeq(CreateProveDlog)),
+    StructuralSchema("GetVarSerializer", "GetVarSerializer", IndexedSeq(GetVar)),
+    StructuralSchema("CreateAvlTreeSerializer", "CreateAvlTreeSerializer", IndexedSeq(CreateAvlTree)),
+    StructuralSchema("ConstantPlaceholderSerializer", "ConstantPlaceholderSerializer", IndexedSeq(ConstantPlaceholder)),
+    StructuralSchema("ConcreteCollectionSerializer", "ConcreteCollectionSerializer", IndexedSeq(ConcreteCollection)),
+    StructuralSchema("PropertyCallSerializer", "PropertyCallSerializer", IndexedSeq(PropertyCall)),
+    StructuralSchema("SelectFieldSerializer", "SelectFieldSerializer", IndexedSeq(SelectField)),
+    StructuralSchema("SigmaPropBytesSerializer", "SigmaPropBytesSerializer", IndexedSeq(SigmaPropBytes)),
+    StructuralSchema("VerifyStarkSerializer", "VerifyStarkSerializer", IndexedSeq(VerifyStark)),
+    StructuralSchema("ValUseSerializer", "ValUseSerializer", IndexedSeq(ValUse)),
+    StructuralSchema("TupleSerializer", "TupleSerializer", IndexedSeq(Tuple)),
+    StructuralSchema("SubstConstantsSerializer", "SubstConstantsSerializer", IndexedSeq(SubstConstants)),
+    StructuralSchema("TaggedVariableSerializer", "TaggedVariableSerializer", IndexedSeq(TaggedVariable)),
+    StructuralSchema("SigmaPropIsProvenSerializer", "SigmaPropIsProvenSerializer", IndexedSeq(SigmaPropIsProven)),
+    StructuralSchema("TwoArgumentsSerializer", "TwoArgumentsSerializer", IndexedSeq(
+      Xor, Exponentiate, MultiplyGroup, ArithOp.Minus, ArithOp.Multiply,
+      ArithOp.Division, ArithOp.Modulo, ArithOp.Plus, ArithOp.Min, ArithOp.Max,
+      BitOp.BitOr, BitOp.BitAnd, BitOp.BitXor, BitOp.BitShiftLeft,
+      BitOp.BitShiftRight, BitOp.BitShiftRightZeroed)),
+    StructuralSchema("ValDefSerializer", "ValDefSerializer", IndexedSeq(ValDef)),
+    StructuralSchema("ValDefSerializer-FunDef", "ValDefSerializer-FunDef-branch", IndexedSeq(FunDef)),
+    StructuralSchema("AppendSerializer", "AppendSerializer", IndexedSeq(Append)),
+    StructuralSchema("AtLeastSerializer", "AtLeastSerializer", IndexedSeq(AtLeast)),
+    StructuralSchema("BooleanTransformerSerializer", "BooleanTransformerSerializer", IndexedSeq(Exists, ForAll)),
+    StructuralSchema("Relation2Serializer", "Relation2Serializer", IndexedSeq(
+      GT, GE, LT, LE, EQ, NEQ, BinOr, BinAnd, BinXor)),
+    StructuralSchema("ByIndexSerializer", "ByIndexSerializer", IndexedSeq(ByIndex)),
+    StructuralSchema("CreateProveDHTupleSerializer", "CreateProveDHTupleSerializer", IndexedSeq(CreateProveDHTuple)),
+    StructuralSchema("QuadrupleSerializer", "QuadrupleSerializer", IndexedSeq(TreeLookup, If)),
+    StructuralSchema("DeserializeContextSerializer", "DeserializeContextSerializer", IndexedSeq(DeserializeContext)),
+    StructuralSchema("DeserializeRegisterSerializer", "DeserializeRegisterSerializer", IndexedSeq(DeserializeRegister)),
+    StructuralSchema("ExtractRegisterAsSerializer", "ExtractRegisterAsSerializer", IndexedSeq(ExtractRegisterAs)),
+    StructuralSchema("FilterSerializer", "FilterSerializer", IndexedSeq(Filter)),
+    StructuralSchema("FoldSerializer", "FoldSerializer", IndexedSeq(Fold)),
+    StructuralSchema("LogicalTransformerSerializer", "LogicalTransformerSerializer", IndexedSeq(AND, OR, XorOf)),
+    StructuralSchema("MapCollectionSerializer", "MapCollectionSerializer", IndexedSeq(MapCollection)),
+    StructuralSchema("SliceSerializer", "SliceSerializer", IndexedSeq(Slice)),
+    StructuralSchema("SimpleTransformerSerializer", "SimpleTransformerSerializer", IndexedSeq(
+      SizeOf, ExtractAmount, ExtractScriptBytes, ExtractBytes, ExtractBytesWithNoRef,
+      ExtractId, ExtractCreationInfo, LongToByteArray, ByteArrayToLong,
+      ByteArrayToBigInt, CalcBlake2b256, CalcSha256, DecodePoint, OptionGet,
+      OptionIsDefined)),
+    StructuralSchema("SigmaTransformerSerializer", "SigmaTransformerSerializer", IndexedSeq(SigmaAnd, SigmaOr)),
+    StructuralSchema("NumericCastSerializer", "NumericCastSerializer", IndexedSeq(Upcast, Downcast))
+  )
+
   private def recordedChildren(
       serializer: ValueSerializer[Value[SType]],
       node: Value[SType]): IndexedSeq[Value[SType]] = {
@@ -173,20 +248,35 @@ class ValueSerializerStructuralSchemaSpec extends AnyPropSpec with Matchers {
     writer.values.toIndexedSeq
   }
 
-  property("all 103 registered opcodes use one of the 47 explicitly covered serializer classes") {
-    val registered = ArrayBuffer.empty[ValueSerializer[_ <: Value[SType]]]
+  property("all 103 registered opcode instances have an explicit structural schema") {
+    val registered = ArrayBuffer.empty[(Byte, ValueSerializer[_ <: Value[SType]])]
     (0 to 255).foreach { code =>
       val serializer = ValueSerializer.serializers(code.toByte)
-      if (serializer != null) registered += serializer
+      if (serializer != null) registered += code.toByte -> serializer
     }
-    val registeredClasses = registered.map(_.getClass.getName).toSet
-    val fixtureClasses = fixtures.map(f => serializerFor(f.node).getClass.getName).toSet
+    val schemaEntries = structuralSchemas.flatMap { schema =>
+      schema.opDescs.map(_ -> schema)
+    }
+    val registeredOpDescs = registered.map(_._2.opDesc).toSet
+    val schemaOpDescs = schemaEntries.map(_._1).toSet
 
     registered.size shouldBe 103
-    registeredClasses.size shouldBe 47
-    fixtureClasses shouldBe registeredClasses
-    registered.foreach { serializer =>
-      serializer.opCode shouldBe serializer.opDesc.opCode
+    schemaEntries.size shouldBe 103
+    schemaOpDescs.size shouldBe 103
+    schemaOpDescs shouldBe registeredOpDescs
+
+    registered.foreach { case (opCode, serializer) =>
+      withClue(f"opcode 0x${opCode & 0xff}%02x (${serializer.opDesc.typeName}): ") {
+        val schema = schemaEntries.collectFirst {
+          case (opDesc, candidate) if opDesc == serializer.opDesc => candidate
+        }.getOrElse(fail("missing structural schema"))
+        val fixture = fixtureByName.getOrElse(schema.fixtureName,
+          fail(s"missing fixture for structural schema ${schema.name}"))
+
+        opCode shouldBe serializer.opCode
+        serializer.opCode shouldBe serializer.opDesc.opCode
+        serializer.getClass shouldBe serializerFor(fixture.node).getClass
+      }
     }
   }
 
