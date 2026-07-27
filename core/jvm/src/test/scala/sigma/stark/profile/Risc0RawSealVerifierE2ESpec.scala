@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import sigma.stark.FriVerifier
-import sigma.stark.circuit.{CircuitTapSet, PolyExtTable}
+import sigma.stark.circuit.{CircuitTapSet, PolyExtOp, PolyExtTable}
 import sigma.stark.profile.Risc0RawSealVerifier._
 
 import scala.collection.mutable
@@ -93,20 +93,23 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
     load("poly-ext table", PolyExtTable.parse(
       resourceLines("/stark-kats/circuit_polyext_ops.tsv").iterator))
 
-  private lazy val verifierParameters = new VerifierParameters(
-    parameters("proof_system_info"),
-    parameters("circuit_info"),
-    parameters("output_size").toInt,
-    parameters("mix_size").toInt,
-    parameters("queries").toInt,
-    parameters("inv_rate").toInt,
-    parameters("ext_size").toInt,
-    parameters("check_size").toInt,
-    parameters("fri_fold").toInt,
-    parameters("fri_fold_po2").toInt,
-    parameters("fri_min_degree").toInt,
-    taps,
-    polyExt)
+  private def parametersWith(program: PolyExtTable): VerifierParameters =
+    new VerifierParameters(
+      parameters("proof_system_info"),
+      parameters("circuit_info"),
+      parameters("output_size").toInt,
+      parameters("mix_size").toInt,
+      parameters("queries").toInt,
+      parameters("inv_rate").toInt,
+      parameters("ext_size").toInt,
+      parameters("check_size").toInt,
+      parameters("fri_fold").toInt,
+      parameters("fri_fold_po2").toInt,
+      parameters("fri_min_degree").toInt,
+      taps,
+      program)
+
+  private lazy val verifierParameters = parametersWith(polyExt)
 
   private def profile(
       root: Array[Byte],
@@ -124,6 +127,29 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
       root: Array[Byte] = innerControlRoot,
       controlOverrides: Map[(Int, Int), Array[Byte]] = Map.empty): Risc0RawSealVerifier =
     new Risc0RawSealVerifier(verifierParameters, profile(root, controlOverrides))
+
+  private def verifierWith(program: PolyExtTable): Risc0RawSealVerifier =
+    new Risc0RawSealVerifier(
+      parametersWith(program),
+      profile(innerControlRoot, Map.empty))
+
+  private def stockTable(ops: Array[PolyExtOp]): PolyExtTable =
+    PolyExtTable.fromValidatedBinary(
+      ops,
+      polyExt.ret,
+      polyExt.fpVars,
+      polyExt.mixVars,
+      polyExt.opcodeHistogram)
+
+  private def assertStockShape(table: PolyExtTable): Unit = {
+    table.opsCount shouldBe polyExt.opsCount
+    table.ret shouldBe polyExt.ret
+    table.fpVars shouldBe polyExt.fpVars
+    table.mixVars shouldBe polyExt.mixVars
+    table.opcodeHistogram shouldBe polyExt.opcodeHistogram
+    table.ops.iterator.map(_.getClass).toSeq shouldBe
+      polyExt.ops.iterator.map(_.getClass).toSeq
+  }
 
   private lazy val rawSeal = resourceBytes(FixtureRoot + "po2-15-raw-seal.bin")
   private lazy val expectedClaim = resourceBytes(FixtureRoot + "po2-15-claim-digest.bin")
@@ -240,6 +266,40 @@ class Risc0RawSealVerifierE2ESpec extends AnyFunSuite with Matchers {
         probe.captured(label).head.toSeq shouldBe polyExtOracle(label).toSeq
       }
     }
+  }
+
+  test("verifier construction rejects a stock-shaped PolyExt tap outside the frozen tap set") {
+    val invalidTapOps = polyExt.ops
+    val getIndex = invalidTapOps.indexWhere(_.isInstanceOf[PolyExtOp.Get])
+    getIndex should be >= 0
+    invalidTapOps(getIndex) = PolyExtOp.Get(taps.tapSize)
+    val invalidTapTable = stockTable(invalidTapOps)
+    assertStockShape(invalidTapTable)
+    val invalidTap = the[ProfileInvariantException] thrownBy verifierWith(invalidTapTable)
+    invalidTap.getMessage shouldBe "constraint tap is out of range"
+  }
+
+  test("verifier construction rejects a stock-shaped PolyExt forward fp reference") {
+    val forwardFpOps = polyExt.ops
+    val arithmeticIndex = forwardFpOps.indexWhere {
+      case _: PolyExtOp.Add | _: PolyExtOp.Sub | _: PolyExtOp.Mul => true
+      case _                                                      => false
+    }
+    arithmeticIndex should be >= 0
+    val currentFp = forwardFpOps.iterator.take(arithmeticIndex).count {
+      case PolyExtOp.True | _: PolyExtOp.AndEqz | _: PolyExtOp.AndCond => false
+      case _                                                           => true
+    }
+    forwardFpOps(arithmeticIndex) = forwardFpOps(arithmeticIndex) match {
+      case PolyExtOp.Add(_, b) => PolyExtOp.Add(currentFp, b)
+      case PolyExtOp.Sub(_, b) => PolyExtOp.Sub(currentFp, b)
+      case PolyExtOp.Mul(_, b) => PolyExtOp.Mul(currentFp, b)
+      case other               => fail(s"expected arithmetic op, got $other")
+    }
+    val forwardFpTable = stockTable(forwardFpOps)
+    assertStockShape(forwardFpTable)
+    val forwardFp = the[ProfileInvariantException] thrownBy verifierWith(forwardFpTable)
+    forwardFp.getMessage shouldBe "constraint program fp operand is out of range"
   }
 
   test("claim mismatch is rejected only after all 50 proof queries") {
