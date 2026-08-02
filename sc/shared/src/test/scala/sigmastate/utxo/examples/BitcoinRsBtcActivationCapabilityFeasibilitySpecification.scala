@@ -16,9 +16,10 @@ import sigma.interpreter.{ContextExtension, ProverResult}
 import sigma.serialization.GroupElementSerializer
 import sigmastate._
 import sigmastate.crypto.DLogProtocol.{DLogProverInput, FirstDLogProverMessage}
-import sigmastate.crypto.CryptoFunctions
+import sigmastate.crypto.{CryptoFunctions, SigmaProtocolPrivateInput}
 import sigmastate.helpers.TestingHelpers._
-import sigmastate.helpers.{CompilerTestingCommons, ErgoLikeContextTesting, ErgoLikeTestInterpreter}
+import sigmastate.helpers.{CompilerTestingCommons, ErgoLikeContextTesting, ErgoLikeTestInterpreter, ErgoLikeTestProvingInterpreter}
+import sigmastate.interpreter.HintsBag
 
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
@@ -58,6 +59,7 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
     capabilityDomain :+ 1.toByte)
   private lazy val originId: Array[Byte] = originBox.id
   private lazy val capabilityMessage = capabilityDomain ++ originId
+  private lazy val sigmaMessageFiatShamirBytes = deterministicSigmaFiatShamirBytes()
   private lazy val sigmaMessageProof = deterministicSigmaMessageProof(capabilityMessage)
   private val bip340Vector0PublicKey = Base16.decode(
     "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9").get
@@ -70,7 +72,7 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
   private lazy val bip340PrimitiveTree = compileV6(bip340VerifierScript(
     "getVar[Coll[Byte]](8).get"))
   private lazy val bip340CapabilityTree = compileV6(bip340VerifierScript(
-    s"sha256(fromBase16(\"$CapabilityDomainHex\") ++ SELF.id)"))
+    s"""sha256(fromBase16("$CapabilityDomainHex") ++ SELF.id)"""))
   private lazy val bip340LengthGuardTree = compileV6(bip340LengthGuardScript)
   private lazy val bip340Vector0Box = capabilityBox(
     bip340Vector0Holder,
@@ -92,11 +94,19 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
   private def capabilityBox(
       key: ProveDlog,
       transactionSeed: Array[Byte],
-      tree: ErgoTree = sigmaMessageProofTree): ErgoBox = testBox(
+      tree: ErgoTree = sigmaMessageProofTree): ErgoBox = capabilityBoxWithRegisters(
+    Map(R4 -> GroupElementConstant(key.value)),
+    transactionSeed,
+    tree)
+
+  private def capabilityBoxWithRegisters(
+      registers: ErgoBox.AdditionalRegisters,
+      transactionSeed: Array[Byte],
+      tree: ErgoTree): ErgoBox = testBox(
     value = 100000000L,
     ergoTree = tree,
     creationHeight = 0,
-    additionalRegisters = Map(R4 -> GroupElementConstant(key.value)),
+    additionalRegisters = registers,
     transactionId = ModifierId @@ Base16.encode(Blake2b256.hash(transactionSeed)),
     boxIndex = 0)
 
@@ -108,6 +118,45 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
     sigmaMessageProof.length shouldBe 56
     new ErgoLikeTestInterpreter()
       .verifySignature(holder, capabilityMessage, sigmaMessageProof)(null) shouldBe true
+  }
+
+  property("Candidate A ABI tuple has an exact golden encoding") {
+    val actual = Seq(
+      s"holder=${Base16.encode(holder.pkBytes)}",
+      s"originId=${Base16.encode(originId)}",
+      s"message=${Base16.encode(capabilityMessage)}",
+      s"fiatShamir=${Base16.encode(sigmaMessageFiatShamirBytes)}",
+      s"proof=${Base16.encode(sigmaMessageProof)}",
+      s"treeSha256=${Base16.encode(Sha256.hash(sigmaMessageProofTree.bytes))}"
+    ).mkString("\n")
+
+    actual shouldBe
+      """holder=033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb
+        |originId=594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6
+        |message=4552472d525342544301000001594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6
+        |fiatShamir=010027100108cd033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb7300002102f848f8efad2756cf409750d2a70d884761dafe5de07073fce5dc5afa2204df77
+        |proof=d18b53a5be0699f048189bd82dffd62fc4574540fa9547b300dc22a4d739b0fcce8b494ec685fda9f56f19391445529da9aa6c932aff6d64
+        |treeSha256=619dcefc7807591b0bb418825c7da4cabcb7016b3052f0bb404f648176caa9dd""".stripMargin
+    sigmaMessageProof.take(24) shouldBe CryptoFunctions.hashFn(
+      sigmaMessageFiatShamirBytes ++ capabilityMessage)
+  }
+
+  property("Candidate A core ProverInterpreter signMessage path emits a wire-compatible envelope") {
+    val signer = new ErgoLikeTestProvingInterpreter {
+      override lazy val secrets: Seq[SigmaProtocolPrivateInput[_]] = Seq(holderInput)
+    }
+    // Captured from ProverInterpreter.signMessage against this exact key and message.
+    val goldenProof = Base16.decode(
+      "b91f53e2b52b69f0049746e184c298522cc9449a0a4ff0a6a6b621dfdf3af984" +
+        "5ecf0b7900ada7c23f1068097ea2dfc26bb4b10c87ab11ee").get
+    val proof = signer.signMessage(holder, capabilityMessage, HintsBag.empty).get
+
+    goldenProof.length shouldBe 56
+    signer.verifySignature(holder, capabilityMessage, goldenProof)(null) shouldBe true
+    verifyCapability(originBox, sigmaMessageProofTree, goldenProof).get._1 shouldBe true
+    proof.length shouldBe 56
+    signer.verifySignature(holder, capabilityMessage, proof)(null) shouldBe true
+    verifyCapability(originBox, sigmaMessageProofTree, proof).get._1 shouldBe true
   }
 
   property("Candidate A canonical proof verifies on-chain") {
@@ -172,15 +221,52 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
       "empty" -> Array.emptyByteArray,
       "short" -> sigmaMessageProof.take(55),
       "long" -> (sigmaMessageProof ++ Array[Byte](0)),
-      "trailing byte" -> (sigmaMessageProof :+ 1.toByte),
       "zero challenge" -> (Array.fill(24)(0.toByte) ++ sigmaMessageProof.drop(24)),
-      "zero response" -> proofWithResponse(BigInteger.ZERO),
+      "equation-invalid zero response" -> proofWithResponse(BigInteger.ZERO),
       "response at group order" -> proofWithResponse(groupOrder),
       "response above group order" -> proofWithResponse(groupOrder.add(BigInteger.ONE)))
 
     cases.foreach { case (label, proof) =>
       assertContractFalse(label, verifyCapability(originBox, sigmaMessageProofTree, proof))
     }
+  }
+
+  property("Candidate A pins generic trailing-byte acceptance against the exact U-2 envelope") {
+    val proofWithTrailingByte = sigmaMessageProof :+ 1.toByte
+
+    new ErgoLikeTestInterpreter()
+      .verifySignature(holder, capabilityMessage, proofWithTrailingByte)(null) shouldBe true
+    assertContractFalse(
+      "U-2 exact envelope",
+      verifyCapability(originBox, sigmaMessageProofTree, proofWithTrailingByte))
+  }
+
+  property("Candidate A preserves malformed ABI fields as evaluation failures") {
+    val missingR4Box = capabilityBoxWithRegisters(
+      Map.empty,
+      capabilityDomain :+ 11.toByte,
+      sigmaMessageProofTree)
+    val wrongTypedR4Box = capabilityBoxWithRegisters(
+      Map(R4 -> IntConstant(1)),
+      capabilityDomain :+ 12.toByte,
+      sigmaMessageProofTree)
+
+    verifyCapability(
+      missingR4Box,
+      sigmaMessageProofTree,
+      deterministicSigmaMessageProof(capabilityDomain ++ missingR4Box.id)).isFailure shouldBe true
+    verifyCapability(
+      wrongTypedR4Box,
+      sigmaMessageProofTree,
+      deterministicSigmaMessageProof(capabilityDomain ++ wrongTypedR4Box.id)).isFailure shouldBe true
+    verifyCapabilityWithExtension(
+      originBox,
+      sigmaMessageProofTree,
+      ContextExtension.empty).isFailure shouldBe true
+    verifyCapabilityWithExtension(
+      originBox,
+      sigmaMessageProofTree,
+      ContextExtension(Map(7.toByte -> IntConstant(1)))).isFailure shouldBe true
   }
 
   property("Candidate A length guard dominates nested capability evaluation") {
@@ -274,15 +360,20 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
       DLogProverInput(BigInteger.ZERO).publicImage,
       capabilityDomain :+ 8.toByte,
       bip340CapabilityTree)
+    val identityMessage = Sha256.hash(capabilityDomain ++ identityBox.id)
+    val proofForIdentityMessage = deterministicBip340Signature(identityMessage)
+    verifyBip340(holder, identityMessage, proofForIdentityMessage).get shouldBe true
     assertContractFalse(
       "identity holder",
-      verifyCapability(identityBox, bip340CapabilityTree, proof))
+      verifyCapability(identityBox, bip340CapabilityTree, proofForIdentityMessage))
   }
 
   property("Candidate B x-only semantics identify opposite-parity group keys") {
     val oppositeHolder = ProveDlog(CryptoConstants.dlogGroup.inverseOf(holder.value))
     holder.pkBytes.head should not be oppositeHolder.pkBytes.head
     holder.pkBytes.drop(1) shouldBe oppositeHolder.pkBytes.drop(1)
+    verifyBip340(holder, bip340CapabilityMessage, bip340Capability).get shouldBe true
+    verifyBip340(oppositeHolder, bip340CapabilityMessage, bip340Capability).get shouldBe true
     val oppositeBox = capabilityBox(
       oppositeHolder,
       capabilityDomain :+ 9.toByte,
@@ -302,7 +393,7 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
       "empty" -> Array.emptyByteArray,
       "short" -> bip340Capability.take(63),
       "long" -> (bip340Capability :+ 0.toByte),
-      "zero response" -> bip340WithResponse(BigInteger.ZERO),
+      "equation-invalid zero response" -> bip340WithResponse(BigInteger.ZERO),
       "response at group order" -> bip340WithResponse(order),
       "response above group order" -> bip340WithResponse(order.add(BigInteger.ONE)),
       "r at field prime" -> bip340WithR(fieldPrime))
@@ -378,13 +469,27 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
     an[sigmastate.lang.parsers.ParserException] should be thrownBy {
       compileAt(
         bip340VerifierScript(
-          s"sha256(fromBase16(\"$CapabilityDomainHex\") ++ SELF.id)"),
+          s"""sha256(fromBase16("$CapabilityDomainHex") ++ SELF.id)"""),
         preV6)
     }
   }
 
   private def deterministicSigmaMessageProof(
       message: Array[Byte],
+      secret: BigInteger = holderSecret,
+      nonce: BigInteger = holderNonce): Array[Byte] = {
+    val group = CryptoConstants.dlogGroup
+    val fiatShamirBytes = deterministicSigmaFiatShamirBytes(secret, nonce)
+    val challenge = CryptoFunctions.hashFn(fiatShamirBytes ++ message)
+    val challengeInteger = new BigInteger(1, challenge)
+    val response = nonce
+      .add(challengeInteger.multiply(secret))
+      .mod(group.order)
+
+    challenge ++ BigIntegers.asUnsignedByteArray(32, response)
+  }
+
+  private def deterministicSigmaFiatShamirBytes(
       secret: BigInteger = holderSecret,
       nonce: BigInteger = holderNonce): Array[Byte] = {
     val group = CryptoConstants.dlogGroup
@@ -404,14 +509,7 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
         Base16.decode("73000021").get ++ commitment.bytes
 
     fiatShamirBytes shouldBe manualFiatShamirBytes
-
-    val challenge = CryptoFunctions.hashFn(fiatShamirBytes ++ message)
-    val challengeInteger = new BigInteger(1, challenge)
-    val response = nonce
-      .add(challengeInteger.multiply(secret))
-      .mod(group.order)
-
-    challenge ++ BigIntegers.asUnsignedByteArray(32, response)
+    fiatShamirBytes
   }
 
   private def proofWithResponse(response: BigInteger): Array[Byte] =
@@ -521,6 +619,13 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
       additionalVars: Map[Byte, EvaluatedValue[_ <: SType]] = Map.empty): Try[(Boolean, Long)] = {
     val extension = ContextExtension(
       additionalVars + (7.toByte -> ByteArrayConstant(capability)))
+    verifyCapabilityWithExtension(input, tree, extension)
+  }
+
+  private def verifyCapabilityWithExtension(
+      input: ErgoBox,
+      tree: ErgoTree,
+      extension: ContextExtension): Try[(Boolean, Long)] = {
     val tx = new ErgoLikeTransaction(
       IndexedSeq(Input(input.id, ProverResult(Array.emptyByteArray, extension))),
       IndexedSeq.empty,
