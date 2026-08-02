@@ -130,13 +130,14 @@ class BitcoinRsBtcActivationCapabilityFeasibilitySpecification
       s"treeSha256=${Base16.encode(Sha256.hash(sigmaMessageProofTree.bytes))}"
     ).mkString("\n")
 
-    actual shouldBe
-      """holder=033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb
-        |originId=594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6
-        |message=4552472d525342544301000001594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6
-        |fiatShamir=010027100108cd033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb7300002102f848f8efad2756cf409750d2a70d884761dafe5de07073fce5dc5afa2204df77
-        |proof=d18b53a5be0699f048189bd82dffd62fc4574540fa9547b300dc22a4d739b0fcce8b494ec685fda9f56f19391445529da9aa6c932aff6d64
-        |treeSha256=619dcefc7807591b0bb418825c7da4cabcb7016b3052f0bb404f648176caa9dd""".stripMargin
+    actual shouldBe Seq(
+      "holder=033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb",
+      "originId=594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6",
+      "message=4552472d525342544301000001594fe74de2705ed110b12a0dd57b04fab0e765317961813a47908e5e8f4dc1b6",
+      "fiatShamir=010027100108cd033536cee5c33fd25d915336f03c1a81993533501f36e6d3d201682ea8df9faedb7300002102f848f8efad2756cf409750d2a70d884761dafe5de07073fce5dc5afa2204df77",
+      "proof=d18b53a5be0699f048189bd82dffd62fc4574540fa9547b300dc22a4d739b0fcce8b494ec685fda9f56f19391445529da9aa6c932aff6d64",
+      "treeSha256=619dcefc7807591b0bb418825c7da4cabcb7016b3052f0bb404f648176caa9dd"
+    ).mkString("\n")
     sigmaMessageProof.take(24) shouldBe CryptoFunctions.hashFn(
       sigmaMessageFiatShamirBytes ++ capabilityMessage)
   }
