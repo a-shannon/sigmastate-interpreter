@@ -60,6 +60,12 @@ negative fixture; the enclosing Claim contract itself remains V6.
 - an optional change output is positive-value and token-free;
 - fee and change register metadata is non-authoritative and unrestricted.
 
+Terminal origin-identity burn is structural across the closed output topology:
+the payout shapes exclude the origin NFT, while fee and change are token-free.
+The evidence suite therefore routes the origin NFT into each auxiliary output
+and uses source mutants to show that relaxing either token-free check permits
+that exact escape.
+
 The feasibility profile uses no executor bounty (`Fe = 0`). It therefore has
 no executor output. This is a profile choice, not a lifecycle-wide claim.
 
@@ -144,7 +150,10 @@ terminal identity burn, token partitions, value conservation, branch-local
 evaluation, two-party authorization, and source mutants. These measurements
 are reproduced as 26/26 on scJVM with Scala 2.11.12, 2.12.21, and 2.13.18.
 They are reproducibility pins for this scaffold only. C-1 composition changes
-the tree bytes, hash, and costs. Independent review remains open.
+the tree bytes, hash, and costs. The three-input source mutant isolates the
+`inputCountOk` guard at Sigma reduction; it is not target-node monetary-balance
+evidence. Independent review accepted commit `4a989b7e`; the evidence-only
+follow-up after that commit remains to be re-reviewed.
 
 ## C-1 Promotion Gate
 

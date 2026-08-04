@@ -150,7 +150,7 @@ class BitcoinRsBtcClaimStateSpineSpecification
       "wrong collateral id",
       evaluateC2(buyerTokens = ArraySeq((alternateTokenId, collateralAmount): Token)))
     assertContractFalse(
-      "wrong collateral amount",
+      "payout collateral amount differs from Claim commitment",
       evaluateC2(buyerTokens = ArraySeq((rsBtcTokenId, collateralAmount - 1L): Token)))
     assertContractFalse(
       "extra payout token",
@@ -171,13 +171,13 @@ class BitcoinRsBtcClaimStateSpineSpecification
     assertContractFalse("wrong fee proposition", evaluateC2(feeTreeOverride = TrueTree))
     assertContractFalse(
       "fee carries token",
-      evaluateC2(feeTokens = ArraySeq((alternateTokenId, 1L): Token)))
+      evaluateC2(feeTokens = ArraySeq((originNftId, 1L): Token)))
     assertContractFalse(
       "change carries token",
       evaluateC2(
         externalInputValue = Some(1L),
         changeValue = Some(1L),
-        changeTokens = ArraySeq((alternateTokenId, 1L): Token)))
+        changeTokens = ArraySeq((originNftId, 1L): Token)))
   }
 
   property("Claim C-2 accepts the payout freshness boundary and rejects one block older") {
@@ -354,7 +354,7 @@ class BitcoinRsBtcClaimStateSpineSpecification
         roleRegister(alternateAuthorizationInput, sellerAuthorizationInput))))
   }
 
-  property("Claim state fixes the origin NFT and rsBTC collateral vector") {
+  property("Claim state enforces the origin-NFT and rsBTC collateral vector shape") {
     assertContractFalse(
       "missing origin NFT",
       evaluateC2(inputTokens = ArraySeq((rsBtcTokenId, collateralAmount): Token)))
@@ -376,11 +376,14 @@ class BitcoinRsBtcClaimStateSpineSpecification
       evaluateC2(inputTokens = ArraySeq(
         (originNftId, 1L): Token,
         (alternateTokenId, collateralAmount): Token)))
-    assertContractFalse(
-      "wrong collateral amount",
-      evaluateC2(inputTokens = ArraySeq(
-        (originNftId, 1L): Token,
-        (rsBtcTokenId, collateralAmount - 1L): Token)))
+    val alternateCollateralAmount = collateralAmount - 1L
+    assertContractTrue(
+      "positive collateral amount is defined by Claim state",
+      evaluateC2(
+        inputTokens = ArraySeq(
+          (originNftId, 1L): Token,
+          (rsBtcTokenId, alternateCollateralAmount): Token),
+        buyerTokens = ArraySeq((rsBtcTokenId, alternateCollateralAmount): Token)))
     assertContractFalse(
       "extra state token",
       evaluateC2(inputTokens = ArraySeq(
@@ -510,13 +513,13 @@ class BitcoinRsBtcClaimStateSpineSpecification
     assertRejected("wrong fee proposition", evaluateC3(feeTreeOverride = TrueTree))
     assertRejected(
       "fee carries token",
-      evaluateC3(feeTokens = ArraySeq((alternateTokenId, 1L): Token)))
+      evaluateC3(feeTokens = ArraySeq((originNftId, 1L): Token)))
     assertRejected(
       "change carries token",
       evaluateC3(
         externalInputValue = Some(1L),
         changeValue = Some(1L),
-        changeTokens = ArraySeq((alternateTokenId, 1L): Token)))
+        changeTokens = ArraySeq((originNftId, 1L): Token)))
   }
 
   property("Claim C-3 supports exact external fee and payout top-ups") {
@@ -586,6 +589,19 @@ class BitcoinRsBtcClaimStateSpineSpecification
   }
 
   property("Claim C-2 mutation checks isolate terminal release invariants") {
+    val inputCountMutant = compileClaimMutant(
+      "val inputCountOk = INPUTS.size == 1 || INPUTS.size == 2",
+      "val inputCountOk = true")
+    assertContractFalse(
+      "input-count control",
+      evaluateC2(externalInputValue = Some(1000000L), includeThirdInput = true))
+    assertContractTrue(
+      "input-count mutant",
+      evaluateC2(
+        externalInputValue = Some(1000000L),
+        includeThirdInput = true,
+        contractTreeOverride = Some(inputCountMutant)))
+
     val deadlineMutant = compileClaimMutant("HEIGHT >= d2", "true")
     assertContractFalse("deadline control", evaluateC2(currentHeight = d2 - 1))
     assertContractTrue(
@@ -630,6 +646,36 @@ class BitcoinRsBtcClaimStateSpineSpecification
         buyerValue = stateValue,
         changeValue = Some(999999L),
         contractTreeOverride = Some(valueMutant)))
+
+    val feeTokenMutant = compileClaimMutantAtOccurrence(
+      "feeOut.tokens.size == 0",
+      "true",
+      occurrence = 0,
+      expectedOccurrences = 2)
+    val originToken = ArraySeq((originNftId, 1L): Token)
+    assertContractFalse("fee-token control", evaluateC2(feeTokens = originToken))
+    assertContractTrue(
+      "fee-token mutant permits origin-NFT escape",
+      evaluateC2(feeTokens = originToken, contractTreeOverride = Some(feeTokenMutant)))
+
+    val changeTokenMutant = compileClaimMutantAtOccurrence(
+      "changeOut.tokens.size == 0",
+      "true",
+      occurrence = 0,
+      expectedOccurrences = 2)
+    assertContractFalse(
+      "change-token control",
+      evaluateC2(
+        externalInputValue = Some(1L),
+        changeValue = Some(1L),
+        changeTokens = originToken))
+    assertContractTrue(
+      "change-token mutant permits origin-NFT escape",
+      evaluateC2(
+        externalInputValue = Some(1L),
+        changeValue = Some(1L),
+        changeTokens = originToken,
+        contractTreeOverride = Some(changeTokenMutant)))
   }
 
   property("Claim state mutation checks isolate key and token-vector invariants") {
@@ -662,6 +708,36 @@ class BitcoinRsBtcClaimStateSpineSpecification
   }
 
   property("Claim C-3 mutation checks isolate split and authorization invariants") {
+    val originToken = ArraySeq((originNftId, 1L): Token)
+    val feeTokenMutant = compileClaimMutantAtOccurrence(
+      "feeOut.tokens.size == 0",
+      "true",
+      occurrence = 1,
+      expectedOccurrences = 2)
+    assertRejected("fee-token control", evaluateC3(feeTokens = originToken))
+    assertContractTrue(
+      "fee-token mutant permits origin-NFT escape",
+      evaluateC3(feeTokens = originToken, contractTreeOverride = Some(feeTokenMutant)))
+
+    val changeTokenMutant = compileClaimMutantAtOccurrence(
+      "changeOut.tokens.size == 0",
+      "true",
+      occurrence = 1,
+      expectedOccurrences = 2)
+    assertRejected(
+      "change-token control",
+      evaluateC3(
+        externalInputValue = Some(1L),
+        changeValue = Some(1L),
+        changeTokens = originToken))
+    assertContractTrue(
+      "change-token mutant permits origin-NFT escape",
+      evaluateC3(
+        externalInputValue = Some(1L),
+        changeValue = Some(1L),
+        changeTokens = originToken,
+        contractTreeOverride = Some(changeTokenMutant)))
+
     val partitionMutant = compileClaimMutant(
       "sellerAmount == collateral._2 - buyerAmount",
       "true")
@@ -1142,6 +1218,31 @@ class BitcoinRsBtcClaimStateSpineSpecification
     compileV6(
       claimScript.substring(0, first) ++ replacement ++
         claimScript.substring(first + target.length))
+  }
+
+  private def compileClaimMutantAtOccurrence(
+      target: String,
+      replacement: String,
+      occurrence: Int,
+      expectedOccurrences: Int): ErgoTree = {
+    val matches = scala.collection.mutable.ArrayBuffer.empty[Int]
+    var from = 0
+    var next = claimScript.indexOf(target, from)
+    while (next >= 0) {
+      matches += next
+      from = next + target.length
+      next = claimScript.indexOf(target, from)
+    }
+    require(
+      matches.size == expectedOccurrences,
+      s"Expected $expectedOccurrences mutation targets but found ${matches.size}: $target")
+    require(
+      occurrence >= 0 && occurrence < matches.size,
+      s"Mutation occurrence $occurrence is out of range for: $target")
+    val index = matches(occurrence)
+    compileV6(
+      claimScript.substring(0, index) ++ replacement ++
+        claimScript.substring(index + target.length))
   }
 
   private lazy val claimScript: String =
