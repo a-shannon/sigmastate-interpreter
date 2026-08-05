@@ -1,0 +1,328 @@
+{
+  "schema_version": "rsbtc.family-bindings.v1",
+  "status": "phase1_candidate",
+  "scope": "I-3/Base and C-2/Base Stage-3 pilot",
+  "family_id": "base-plain-stage3-pilot-candidate",
+  "binding_table": {
+    "path": "docs/plans/2026-08-05-rsbtc-base-family-bindings-candidate.json",
+    "sha256_delivery": "detached"
+  },
+  "source_pins": {
+    "lifecycle": {
+      "artifact": "rsbtc-insurance-vault-lifecycle-plan-rev3.md",
+      "sha256": "4e5dd69daf7b09c5e2bc5eecff35f4eca18f9981f9edd2af81cd2bb78f74767a"
+    },
+    "evidence_head": "0d0da9936706198a011df2b9036c6ac99fb03407",
+    "implementation_sources": [
+      {
+        "id": "u2_spec",
+        "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcU2ActivationSpecification.scala",
+        "sha256": "ea9d078efdd36d3596ce4609a39ade962fa83ba75e1ee5371695e592c0911694"
+      },
+      {
+        "id": "claim_spine_spec",
+        "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcClaimStateSpineSpecification.scala",
+        "sha256": "7219bd27b9c4f3e9e67d800c4f9e5782812a8d0e389c4ad60686405176cfa586"
+      },
+      {
+        "id": "i3_claim_opening_spec",
+        "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcI3ClaimOpeningSpecification.scala",
+        "sha256": "3b4e4c562aa3449371a0dac7c3c91deed69dfc5379b611a3ac0049a899c3c8fc"
+      }
+    ]
+  },
+  "policies": {
+    "unlisted_symbol": "reject",
+    "unresolved_binding": "cannot close executable evidence",
+    "manifest_only_binding": "may close MANIFEST_LOAD evidence only",
+    "derived_value_as_fault_coordinate": "reject"
+  },
+  "bindings": [
+    {
+      "symbol": "maxCreationHeightLag",
+      "branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "implemented_branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Int",
+      "encoding": "ErgoScript Int literal",
+      "value": "2",
+      "equality_relation": "each covered successor or state-funded payout creationHeight is at least max(0, HEIGHT - maxCreationHeightLag)",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "private val maxCreationHeightLag / unactivatedVaultScript",
+          "branch_scope": ["U-2"]
+        },
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "private val maxCreationHeightLag / claimScript",
+          "branch_scope": ["C-2", "C-3"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "private val maxCreationHeightLag / insuredDealScript",
+          "branch_scope": ["I-3"]
+        }
+      ]
+    },
+    {
+      "symbol": "feeProposition.Base",
+      "branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "implemented_branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Coll[Byte]",
+      "encoding": "exact ErgoTree bytes returned by ErgoTreePredef.feeProposition()",
+      "value": "ErgoTreePredef.feeProposition().bytes",
+      "equality_relation": "recognized miner-fee output propositionBytes equals the compiled byte string",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "feeTree / feePropositionBytes / U-2 feeOutOk",
+          "branch_scope": ["U-2"]
+        },
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "feeTree / feePropositionBytes / C-2 and C-3 feeOutOk",
+          "branch_scope": ["C-2", "C-3"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "feeTree / feePropositionBytes / I-3 feeOutOk",
+          "branch_scope": ["I-3"]
+        }
+      ]
+    },
+    {
+      "symbol": "Fs.U2",
+      "branch_scope": ["U-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "1000000",
+      "equality_relation": "state-funded miner-fee contribution equals Fs.U2",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "private val stateFee / unactivatedVaultScript"
+        }
+      ]
+    },
+    {
+      "symbol": "Fe.U2",
+      "branch_scope": ["U-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "zero represented by executor-output absence",
+      "value": "0",
+      "equality_relation": "executor output is absent and Ye equals zero",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "U-2 outputCountOk and successor/fee/change positions"
+        }
+      ]
+    },
+    {
+      "symbol": "Rnext.U2",
+      "branch_scope": ["U-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "10000000",
+      "equality_relation": "InsuredDeal successor value is at least Rnext.U2",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "private val insuredDealReserveFloor / successorValueOk"
+        }
+      ]
+    },
+    {
+      "symbol": "outputSchema.U2",
+      "branch_scope": ["U-2"],
+      "authority_class": "compiled_semantics",
+      "status": "implemented_candidate",
+      "value_type": "OutputSchema",
+      "encoding": "ordered semantic descriptor",
+      "value": "insured-deal@0;fee@1;change@2-if-external;executor=absent",
+      "equality_relation": "two outputs without an external input; two or three outputs with one token-free external input",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "U-2 outputCountOk and OUTPUTS(0..2) bindings"
+        }
+      ]
+    },
+    {
+      "symbol": "Fs.I3",
+      "branch_scope": ["I-3"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "1000000",
+      "equality_relation": "state-funded miner-fee contribution equals Fs.I3",
+      "materialization_sites": [
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "private val stateFee / I-3 feeOutOk and externalValueOk"
+        }
+      ]
+    },
+    {
+      "symbol": "Fe.I3",
+      "branch_scope": ["I-3"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "zero represented by executor-output absence",
+      "value": "0",
+      "equality_relation": "executor output is absent and Ye equals zero",
+      "materialization_sites": [
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "I-3 outputCountOk and Claim/fee/change positions"
+        }
+      ]
+    },
+    {
+      "symbol": "Rnext.I3",
+      "branch_scope": ["I-3"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "10000000",
+      "equality_relation": "Claim successor value is at least Rnext.I3",
+      "materialization_sites": [
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "private val claimReserveFloor / successorValueOk"
+        }
+      ]
+    },
+    {
+      "symbol": "outputSchema.I3",
+      "branch_scope": ["I-3"],
+      "authority_class": "compiled_semantics",
+      "status": "implemented_candidate",
+      "value_type": "OutputSchema",
+      "encoding": "ordered semantic descriptor",
+      "value": "claim-successor@0;fee@1;change@2-if-external;executor=absent",
+      "equality_relation": "two outputs without an external input; two or three outputs with one token-free external input",
+      "materialization_sites": [
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "I-3 outputCountOk and OUTPUTS(0..2) bindings"
+        }
+      ]
+    },
+    {
+      "symbol": "ClaimPropositionHash",
+      "branch_scope": ["I-3"],
+      "authority_class": "compiled_constant",
+      "status": "pending_final_compile",
+      "value_type": "Sigma Coll[Byte]",
+      "encoding": "Blake2b-256 of the exact final Claim proposition bytes",
+      "value": null,
+      "equality_relation": "blake2b256(claimSuccessor.propositionBytes) equals ClaimPropositionHash",
+      "materialization_sites": [],
+      "phase1_evidence_note": "The I-3 feasibility spec uses a provisional Claim target that cannot close this binding."
+    },
+    {
+      "symbol": "Fs.C2",
+      "branch_scope": ["C-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "1000000",
+      "equality_relation": "state-funded miner-fee contribution equals Fs.C2",
+      "materialization_sites": [
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "private val stateFee / C-2 feeOutOk and externalValueOk"
+        }
+      ]
+    },
+    {
+      "symbol": "Fe.C2",
+      "branch_scope": ["C-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "zero represented by executor-output absence",
+      "value": "0",
+      "equality_relation": "executor output is absent and Ye equals zero",
+      "materialization_sites": [
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "C-2 outputCountOk and buyer/fee/change positions"
+        }
+      ]
+    },
+    {
+      "symbol": "Bsingle.C2",
+      "branch_scope": ["C-2"],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Long",
+      "encoding": "ErgoScript Long literal",
+      "value": "1000000",
+      "equality_relation": "buyer payout value is at least Bsingle.C2",
+      "materialization_sites": [
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "private val singlePayoutFloor / C-2 buyerOutOk"
+        }
+      ]
+    },
+    {
+      "symbol": "outputSchema.C2",
+      "branch_scope": ["C-2"],
+      "authority_class": "compiled_semantics",
+      "status": "implemented_candidate",
+      "value_type": "OutputSchema",
+      "encoding": "ordered semantic descriptor",
+      "value": "buyer@0;fee@1;change@2-if-external;executor=absent",
+      "equality_relation": "two outputs without an external input; two or three outputs with one token-free external input",
+      "materialization_sites": [
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "C-2 outputCountOk and OUTPUTS(0..2) bindings"
+        }
+      ]
+    },
+    {
+      "symbol": "outputSchemaDigest.C2",
+      "branch_scope": ["C-2"],
+      "authority_class": "build_manifest_integrity",
+      "status": "canonical_descriptor_not_defined",
+      "value_type": "bytes32",
+      "encoding": "SHA-256 of a future canonical output-schema descriptor",
+      "value": null,
+      "equality_relation": "off-chain build-manifest equality only; C-2 does not read this digest",
+      "materialization_sites": [],
+      "permitted_evidence_stage": ["MANIFEST_LOAD"]
+    },
+    {
+      "symbol": "outputSchemaDigest.I3",
+      "branch_scope": ["I-3"],
+      "authority_class": "build_manifest_integrity",
+      "status": "canonical_descriptor_not_defined",
+      "value_type": "bytes32",
+      "encoding": "SHA-256 of a future canonical output-schema descriptor",
+      "value": null,
+      "equality_relation": "off-chain build-manifest equality only; I-3 does not read this digest",
+      "materialization_sites": [],
+      "permitted_evidence_stage": ["MANIFEST_LOAD"]
+    }
+  ]
+}
