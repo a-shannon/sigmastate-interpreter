@@ -27,7 +27,7 @@
       {
         "id": "i3_claim_opening_spec",
         "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcI3ClaimOpeningSpecification.scala",
-        "sha256": "73730da2146fefc3e7bb94801dea28e892baa53f332b687a2e530da638d01875"
+        "sha256": "5ae9bab113f4afad50b647b545b08009067ee8d89c72fca50e8948651a99946c"
       },
       {
         "id": "base_plain_family_policy",
@@ -216,7 +216,7 @@
         },
         {
           "source_id": "i3_claim_opening_spec",
-          "locator": "insuredDealScript family-emission guard and excessive-deduction negative",
+          "locator": "emitInsuredDealScript / compileInsuredDealFamily guard and excessive-deduction non-emission negative",
           "branch_scope": ["I-3"]
         }
       ]

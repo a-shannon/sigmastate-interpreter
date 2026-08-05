@@ -57,7 +57,7 @@ schema, value equations, positives, negatives, costs, and proposition hash.
 The machine-readable pilot candidate table is
 `2026-08-05-rsbtc-base-family-bindings-candidate.json`. Its detached SHA-256
 is
-`dd3caa9da00075346ed735217c6f8dce9a0bf172bea92330e87ccc6ed6125824`.
+`781c36013b7cb42c670035414b06ac6baa1861b34ae21ad90561242a7df02bf7`.
 
 The table distinguishes three authority classes:
 

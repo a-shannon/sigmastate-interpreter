@@ -21,6 +21,7 @@ import sigmastate.helpers.TestingHelpers._
 import sigmastate.helpers.{CompilerTestingCommons, ContextEnrichingTestProvingInterpreter, ErgoLikeContextTesting, ErgoLikeTestInterpreter}
 
 import java.math.BigInteger
+import java.nio.ByteBuffer
 import scala.collection.compat.immutable.ArraySeq
 import scala.util.Try
 
@@ -50,6 +51,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     "0168e8ca61fde3560f2c456b919f9826ad1471ac98cd6a56a328f7b7ddf3d285"
   private val Phase1ProvisionalCanonicalCost = 1218L
   private val Phase1ProvisionalExternalCost = 1237L
+  private val ExpectedCanonicalNonSecretFingerprint =
+    "2d5bbaad6efd7944e648dc69e91acb4416ef974698f485e417ca701bfe9bfc8e"
 
   private val d1 = 780
   private val responseMin = 100
@@ -85,9 +88,33 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     result.get._1 shouldBe true
   }
 
-  property("Base/PLAIN pins pilot ABI literals and rejects excessive state deduction") {
-    Try(BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)).isSuccess shouldBe true
-    Try(BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee + 1L)).isFailure shouldBe true
+  property("Base/PLAIN I-3 emitter rejects excessive state deduction before source or tree emission") {
+    val acceptedSource = Try(emitInsuredDealScript(stateFee))
+    acceptedSource.isSuccess shouldBe true
+    acceptedSource.get shouldBe insuredDealScript
+
+    var compilerInvoked = false
+    val acceptedTree = compileInsuredDealFamily(stateFee, { source =>
+      compilerInvoked = true
+      compileV6(source)
+    })
+    compilerInvoked shouldBe true
+    acceptedTree.bytes shouldBe insuredDealTree.bytes
+
+    val excessiveStateFee = stateFee + 1L
+    val rejectedSource = Try(emitInsuredDealScript(excessiveStateFee))
+    assertFamilyEmissionFailure("excessive I-3 source", rejectedSource)
+    rejectedSource.toOption shouldBe None
+
+    compilerInvoked = false
+    val rejectedTree = Try(compileInsuredDealFamily(excessiveStateFee, { source =>
+      compilerInvoked = true
+      compileV6(source)
+    }))
+    assertFamilyEmissionFailure("excessive I-3 tree", rejectedTree)
+    rejectedTree.toOption shouldBe None
+    compilerInvoked shouldBe false
+
     Base16.encode(rsBtcTokenIdBytes) shouldBe ExpectedRsBtcTokenIdHex
     Base16.encode(feeTree.bytes) shouldBe ExpectedFeePropositionHex
   }
@@ -142,15 +169,26 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       R7,
       roleRegister(buyerAuthorizationInput, buyerPayoutInput))
     val coinbaseSentinel = Array.fill(32)(0.toByte) ++ Array.fill(4)(0xff.toByte)
+    // Removing the final register isolates absence while preserving dense-box serialization.
+    val missingClaimCommitment = canonicalInsuredDealRegisters - R9
 
+    assertSingleMapCoordinateRemoval(
+      "missing R9 fixture",
+      canonicalInsuredDealRegisters,
+      missingClaimCommitment,
+      R9)
+    assertContractTrue(
+      "R9 presence control",
+      evaluateI3(inputRegisters = canonicalInsuredDealRegisters))
     assertEvaluationFailure(
-      "missing mandatory register range",
-      evaluateI3(inputRegisters = Map.empty),
+      "missing R9 Claim commitment",
+      evaluateI3(inputRegisters = missingClaimCommitment),
       classOf[NoSuchElementException])
     assertEvaluationFailure(
       "wrong-typed R8",
       evaluateI3(inputRegisters = canonicalInsuredDealRegisters.updated(R8, IntConstant(d1))),
-      classOf[sigma.exceptions.InvalidType])
+      classOf[sigma.exceptions.InvalidType],
+      "Cannot getReg[Coll[Int]](8): invalid type")
     assertContractFalse(
       "outpoint size",
       evaluateI3(inputRegisters = canonicalInsuredDealRegisters.updated(
@@ -276,7 +314,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       "wrong-typed D2",
       evaluateI3(claimRegistersOverride = Some(
         canonicalClaimRegisters.updated(R8, LongConstant(d2.toLong)))),
-      classOf[sigma.exceptions.InvalidType])
+      classOf[sigma.exceptions.InvalidType],
+      "Cannot getReg[Int](8): invalid type")
     assertContractFalse(
       "unexpected R9",
       evaluateI3(claimRegistersOverride = Some(
@@ -286,7 +325,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       "wrong-typed unexpected R9",
       evaluateI3(claimRegistersOverride = Some(
         canonicalClaimRegisters.updated(R9, IntConstant(1)))),
-      classOf[sigma.exceptions.InvalidType])
+      classOf[sigma.exceptions.InvalidType],
+      "Cannot getReg[Coll[Byte]](9): invalid type")
     assertContractFalse(
       "wrong origin NFT",
       evaluateI3(claimTokens = ArraySeq(
@@ -380,18 +420,41 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   }
 
   property("I-3 requires buyer authorization and a closed branch tag") {
-    assertProofFailure("missing buyer proof", evaluateI3(authorizationSecrets = Seq.empty))
+    val canonicalExtension = Map[Byte, EvaluatedValue[_ <: SType]](
+      0.toByte -> ByteConstant(2.toByte))
+    val missingBranchExtension = Map.empty[Byte, EvaluatedValue[_ <: SType]]
+
+    assertContractTrue(
+      "buyer authorization accepting control",
+      evaluateI3(expectedNonSecretFingerprint = Some(ExpectedCanonicalNonSecretFingerprint)))
+    assertProofFailure(
+      "missing buyer proof",
+      evaluateI3(
+        authorizationSecrets = Seq.empty,
+        expectedNonSecretFingerprint = Some(ExpectedCanonicalNonSecretFingerprint)))
     assertProofFailure(
       "wrong buyer proof",
-      evaluateI3(authorizationSecrets = Seq(alternateAuthorizationInput)))
+      evaluateI3(
+        authorizationSecrets = Seq(alternateAuthorizationInput),
+        expectedNonSecretFingerprint = Some(ExpectedCanonicalNonSecretFingerprint)))
+
+    assertSingleMapCoordinateRemoval(
+      "missing var 0 fixture",
+      canonicalExtension,
+      missingBranchExtension,
+      0.toByte)
+    assertContractTrue(
+      "branch tag presence control",
+      evaluateI3(extensionValuesOverride = Some(canonicalExtension)))
     assertEvaluationFailure(
       "missing branch tag",
-      evaluateI3(extensionValuesOverride = Some(Map.empty)),
+      evaluateI3(extensionValuesOverride = Some(missingBranchExtension)),
       classOf[NoSuchElementException])
     assertEvaluationFailure(
       "wrong-typed branch tag",
       evaluateI3(extensionValuesOverride = Some(Map(0.toByte -> IntConstant(2)))),
-      classOf[sigma.exceptions.InvalidType])
+      classOf[sigma.exceptions.InvalidType],
+      "Cannot getVar[Byte](0): invalid type")
     assertContractFalse(
       "I-1 remains closed",
       evaluateI3(branch = 0.toByte, directVerification = true))
@@ -519,7 +582,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       authorizationSecrets: Seq[DLogProverInput] = Seq(buyerAuthorizationInput),
       stateAtInputOne: Boolean = false,
       directVerification: Boolean = false,
-      contractTreeOverride: Option[ErgoTree] = None): Try[(Boolean, Long)] = {
+      contractTreeOverride: Option[ErgoTree] = None,
+      expectedNonSecretFingerprint: Option[String] = None): Try[(Boolean, Long)] = {
     val contractTree = contractTreeOverride.getOrElse(insuredDealTree)
     val stateInput = testBox(
       inputValue,
@@ -625,6 +689,19 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       selfIndex = selfIndex,
       activatedVersion = V6SoftForkVersion)
 
+    expectedNonSecretFingerprint.foreach { expected =>
+      val actual = nonSecretFixtureFingerprint(
+        contractTree,
+        tx,
+        boxesToSpend,
+        dataBoxes,
+        evaluationHeight,
+        selfIndex)
+      withClue("non-secret fixture fingerprint") {
+        actual shouldBe expected
+      }
+    }
+
     if (directVerification) {
       return new ErgoLikeTestInterpreter().verify(
         contractTree,
@@ -666,10 +743,15 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   private def assertEvaluationFailure(
       label: String,
       result: Try[(Boolean, Long)],
-      expectedCause: Class[_ <: Throwable]): Unit =
+      expectedCause: Class[_ <: Throwable],
+      expectedMessagePrefix: String = ""): Unit =
     withClue(label) {
       result.isFailure shouldBe true
-      rootCause(result.failed.get).getClass shouldBe expectedCause
+      val cause = rootCause(result.failed.get)
+      cause.getClass shouldBe expectedCause
+      if (expectedMessagePrefix.nonEmpty) {
+        Option(cause.getMessage).getOrElse("") should startWith (expectedMessagePrefix)
+      }
     }
 
   private def assertProofFailure(label: String, result: Try[(Boolean, Long)]): Unit =
@@ -678,7 +760,50 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       val cause = rootCause(result.failed.get)
       cause shouldBe a[AssertionError]
       cause.getMessage should startWith ("assertion failed: Tree root should be real")
+      cause.getMessage should include (buyerAuthorizationInput.publicImage.toString)
     }
+
+  private def assertFamilyEmissionFailure(label: String, result: Try[_]): Unit =
+    withClue(label) {
+      result.isFailure shouldBe true
+      val cause = rootCause(result.failed.get)
+      cause.getClass shouldBe classOf[IllegalArgumentException]
+      cause.getMessage shouldBe
+        "requirement failed: The state-funded miner fee exceeds the family deduction cap"
+    }
+
+  private def assertSingleMapCoordinateRemoval[K, V](
+      label: String,
+      baseline: Map[K, V],
+      candidate: Map[K, V],
+      removed: K): Unit =
+    withClue(label) {
+      baseline.contains(removed) shouldBe true
+      candidate shouldBe (baseline - removed)
+    }
+
+  private def nonSecretFixtureFingerprint(
+      contractTree: ErgoTree,
+      tx: ErgoLikeTransaction,
+      boxesToSpend: IndexedSeq[ErgoBox],
+      dataBoxes: IndexedSeq[ErgoBox],
+      evaluationHeight: Int,
+      selfIndex: Int): String = {
+    val components = IndexedSeq(
+      contractTree.bytes,
+      ErgoLikeTransactionSerializer.toBytes(tx),
+      intBytes(evaluationHeight),
+      intBytes(selfIndex),
+      intBytes(V6SoftForkVersion.toInt)) ++
+      boxesToSpend.map(_.bytes) ++ dataBoxes.map(_.bytes)
+    val framed = components.foldLeft(Array.emptyByteArray) { (acc, bytes) =>
+      acc ++ intBytes(bytes.length) ++ bytes
+    }
+    Base16.encode(Blake2b256.hash(framed))
+  }
+
+  private def intBytes(value: Int): Array[Byte] =
+    ByteBuffer.allocate(4).putInt(value).array()
 
   private def pairConstant(
       first: SType#WrappedType,
@@ -751,14 +876,14 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
         insuredDealScript.substring(first + target.length))
   }
 
-  private lazy val insuredDealScript: String = {
-    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)
+  private def emitInsuredDealScript(stateFeeValue: Long): String = {
+    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFeeValue)
     s"""{
       |  val branch = getVar[Byte](0).get
       |  val rsBtcTokenId = fromBase16("${Base16.encode(rsBtcTokenIdBytes)}")
       |  val expectedClaimHash = fromBase16("${Base16.encode(provisionalClaimHash)}")
       |  val feePropositionBytes = fromBase16("${Base16.encode(feeTree.bytes)}")
-      |  val stateFee = ${stateFee}L
+      |  val stateFee = ${stateFeeValue}L
       |  val claimReserveFloor = ${claimReserveFloor}L
       |  val maxCreationHeightLag = $maxCreationHeightLag
       |  val protocolResponseFloor = 50
@@ -894,4 +1019,11 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       |  }
       |}""".stripMargin.replace("\r\n", "\n")
   }
+
+  private def compileInsuredDealFamily(
+      stateFeeValue: Long,
+      compiler: String => ErgoTree): ErgoTree =
+    compiler(emitInsuredDealScript(stateFeeValue))
+
+  private lazy val insuredDealScript: String = emitInsuredDealScript(stateFee)
 }

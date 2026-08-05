@@ -114,13 +114,20 @@ green.
 
 The current candidate source is
 `BitcoinRsBtcI3ClaimOpeningSpecification.scala`, SHA-256
-`73730da2146fefc3e7bb94801dea28e892baa53f332b687a2e530da638d01875`.
+`5ae9bab113f4afad50b647b545b08009067ee8d89c72fca50e8948651a99946c`.
 Its focused suite contains 13 properties and passes `13/13` on
 Scala `2.11.12`, `2.12.21`, and `2.13.18`. The semantic negatives assert
 `CONTRACT_FALSE` through direct Sigma reduction, malformed typed access asserts
-`EVALUATION_FAILURE` with its exact root-cause class, and missing or wrong buyer
-secrets assert the prover's witness-deficiency failure rather than a generic
-failed `Try`.
+`EVALUATION_FAILURE` with its exact root-cause class and stable coordinate/type
+prefix, and missing coordinates use a same-fixture accepting control plus an
+exact one-coordinate delta. Missing or wrong buyer secrets share a pinned
+non-secret fixture fingerprint with their accepting control and assert the
+buyer proposition named by the prover's witness-deficiency failure.
+
+The family-cap negative invokes the I-3 source emitter itself. At the accepted
+boundary it emits and compiles the canonical tree; one nanoERG above the cap it
+returns neither source nor tree, never invokes the compiler, and identifies the
+family guard through its exact `IllegalArgumentException` message.
 
 The four source mutants each require one unique occurrence within the emitted
 ErgoScript and turn their selected isolated control into an accepting
