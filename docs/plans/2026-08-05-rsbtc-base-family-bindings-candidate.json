@@ -17,17 +17,22 @@
       {
         "id": "u2_spec",
         "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcU2ActivationSpecification.scala",
-        "sha256": "ea9d078efdd36d3596ce4609a39ade962fa83ba75e1ee5371695e592c0911694"
+        "sha256": "9fdf70f30448b360d541b435bdc986ebbfd6b546db7ea23871aaf3c561996590"
       },
       {
         "id": "claim_spine_spec",
         "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcClaimStateSpineSpecification.scala",
-        "sha256": "7219bd27b9c4f3e9e67d800c4f9e5782812a8d0e389c4ad60686405176cfa586"
+        "sha256": "d113492a7145473456a9088bc79937bab5712e38c967ba9ff9044cc8f085cba1"
       },
       {
         "id": "i3_claim_opening_spec",
         "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcI3ClaimOpeningSpecification.scala",
-        "sha256": "3b4e4c562aa3449371a0dac7c3c91deed69dfc5379b611a3ac0049a899c3c8fc"
+        "sha256": "73730da2146fefc3e7bb94801dea28e892baa53f332b687a2e530da638d01875"
+      },
+      {
+        "id": "base_plain_family_policy",
+        "path": "sc/shared/src/test/scala/sigmastate/utxo/examples/BitcoinRsBtcBasePlainFamilyPolicy.scala",
+        "sha256": "98c5621e8057b1c4ece5954ad2480d8ef47c92e91a40521105382cf507f690e6"
       }
     ]
   },
@@ -75,8 +80,8 @@
       "authority_class": "compiled_constant",
       "status": "implemented_candidate",
       "value_type": "Coll[Byte]",
-      "encoding": "exact ErgoTree bytes returned by ErgoTreePredef.feeProposition()",
-      "value": "ErgoTreePredef.feeProposition().bytes",
+      "encoding": "lowercase Base16 of exact ErgoTree bytes returned by ErgoTreePredef.feeProposition()",
+      "value": "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304",
       "equality_relation": "recognized miner-fee output propositionBytes equals the compiled byte string",
       "materialization_sites": [
         {
@@ -91,7 +96,127 @@
         },
         {
           "source_id": "i3_claim_opening_spec",
-          "locator": "feeTree / feePropositionBytes / I-3 feeOutOk",
+          "locator": "ExpectedFeePropositionHex / feeTree / feePropositionBytes / I-3 feeOutOk",
+          "branch_scope": ["I-3"]
+        }
+      ]
+    },
+    {
+      "symbol": "rsBtcTokenId",
+      "branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "implemented_branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "value_type": "Coll[Byte]",
+      "encoding": "32-byte lowercase Base16 token id",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111",
+      "equality_relation": "the collateral token id equals the compiled Phase-1 family candidate id",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "rsBtcTokenIdBytes / U-2 token checks",
+          "branch_scope": ["U-2"]
+        },
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "rsBtcTokenIdBytes / Claim token checks",
+          "branch_scope": ["C-2", "C-3"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "ExpectedRsBtcTokenIdHex / rsBtcTokenIdBytes / I-3 token checks",
+          "branch_scope": ["I-3"]
+        }
+      ],
+      "phase1_evidence_note": "This is an executable fixture candidate, not a deployment token id."
+    },
+    {
+      "symbol": "maxErgoInputCount",
+      "branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "implemented_branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_semantics",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Int",
+      "encoding": "maximum accepted INPUTS.size",
+      "value": "2",
+      "equality_relation": "the state is input 0 and each covered branch accepts one state input plus at most one token-free external input",
+      "materialization_sites": [
+        {
+          "source_id": "u2_spec",
+          "locator": "U-2 inputCountOk and stateIsFirst",
+          "branch_scope": ["U-2"]
+        },
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "C-2/C-3 inputCountOk and stateIsFirst",
+          "branch_scope": ["C-2", "C-3"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "I-3 inputCountOk and stateIsFirst",
+          "branch_scope": ["I-3"]
+        }
+      ]
+    },
+    {
+      "symbol": "feeFunderChangeIndex",
+      "branch_scope": ["I-3", "C-2"],
+      "implemented_branch_scope": ["I-3", "C-2"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_semantics",
+      "status": "implemented_candidate",
+      "value_type": "Sigma Int",
+      "encoding": "zero-based OUTPUTS index for optional token-free external-input change",
+      "value": "2",
+      "equality_relation": "when present in the Stage-3 pilot branches, fee-funder change is OUTPUTS(2)",
+      "materialization_sites": [
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "C-2 hasChange / changeOut = OUTPUTS.getOrElse(2, SELF)",
+          "branch_scope": ["C-2"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "I-3 hasChange / changeOut = OUTPUTS.getOrElse(2, SELF)",
+          "branch_scope": ["I-3"]
+        }
+      ],
+      "phase1_evidence_note": "This generic pilot coordinate is intentionally scoped to I-3 and C-2; branches with a different output schema require a branch-local symbol."
+    },
+    {
+      "symbol": "totalStateDeductionMax",
+      "branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "implemented_branch_scope": ["U-2", "I-3", "C-2", "C-3"],
+      "pending_branch_scope": [],
+      "authority_class": "compiled_constant",
+      "status": "implemented_candidate",
+      "enforcement_locus": "FAMILY_COMPILATION",
+      "permitted_evidence_stage": ["MANIFEST_LOAD", "FIXTURE_CONSTRUCTION"],
+      "value_type": "Sigma Long",
+      "encoding": "Scala Long literal validated before ErgoScript family emission",
+      "value": "1000000",
+      "equality_relation": "0 < Fs and Fs + Fe is at most totalStateDeductionMax, checked without overflowing addition",
+      "materialization_sites": [
+        {
+          "source_id": "base_plain_family_policy",
+          "locator": "TotalStateDeductionMax / requireValidStateDeduction",
+          "branch_scope": ["U-2", "I-3", "C-2", "C-3"]
+        },
+        {
+          "source_id": "u2_spec",
+          "locator": "unactivatedVaultScript family-emission guard",
+          "branch_scope": ["U-2"]
+        },
+        {
+          "source_id": "claim_spine_spec",
+          "locator": "claimScript family-emission guard",
+          "branch_scope": ["C-2", "C-3"]
+        },
+        {
+          "source_id": "i3_claim_opening_spec",
+          "locator": "insuredDealScript family-emission guard and excessive-deduction negative",
           "branch_scope": ["I-3"]
         }
       ]
@@ -282,7 +407,8 @@
           "source_id": "claim_spine_spec",
           "locator": "private val singlePayoutFloor / C-2 buyerOutOk"
         }
-      ]
+      ],
+      "phase1_evidence_note": "The 0.001 ERG floor is a feasibility value for the pilot. Deployment freeze requires measurement against the exact serialized token-bearing P2PK output and target-node policy."
     },
     {
       "symbol": "outputSchema.C2",

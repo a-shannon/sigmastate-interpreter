@@ -933,7 +933,8 @@ class BitcoinRsBtcU2ActivationSpecification
         unactivatedVaultScript.substring(first + target.length))
   }
 
-  private lazy val unactivatedVaultScript: String =
+  private lazy val unactivatedVaultScript: String = {
+    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)
     s"""{
       |  // Context var 0: 0 = U-1, 1 = U-2. This Phase-1 slice enables U-2.
       |  val branch = getVar[Byte](0).get
@@ -1108,4 +1109,5 @@ class BitcoinRsBtcU2ActivationSpecification
       |    sigmaProp(false)
       |  }
       |}""".stripMargin.replace("\r\n", "\n")
+  }
 }

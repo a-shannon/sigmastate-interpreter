@@ -102,10 +102,10 @@ green.
 | Exact origin NFT and rsBTC collateral vector | U-2 produces; I-3 preserves | Claim identity and C-1/C-2/C-3 value release | Deal substitution, collateral drift, or extra-token carriage | Input and successor token-field negatives |
 | State at input 0, one optional token-free external input, zero data inputs | I-3 | Transaction accounting and branch-local witness interpretation | State ambiguity, undeclared funding authority, or hidden authenticated input | Topology negatives |
 | `Fe.I3 = 0` and exact output positions | I-3 | Claim, fee, and optional-change consumers | Undeclared executor value or output-index confusion | Extra-output and change-without-input negatives |
-| `HEIGHT >= D1` and widened inclusive D2 bounds | I-3 | Claim C-1/C-2 deadline semantics | Premature Claim or invalid response horizon | Boundary pair and D2-lower-bound mutant |
+| `HEIGHT >= D1`, widened inclusive D2 bounds, and explicit strictly-later-height counts | I-3 | Claim C-1/C-2 deadline semantics | Premature Claim or invalid response horizon | Count equalities, boundary pair, and D2-lower-bound mutant |
 | Exact Claim proposition, R4-R8 continuity, and no R9 | I-3 | C-1/C-2/C-3 | Successor script or deal terms can be replaced | One field/type negative per successor coordinate and proposition mutant |
 | Bounded-fresh Claim creation height | I-3 | Downstream deadline/rent assumptions | A stale or future-labelled successor can enter the state chain | Lower and upper creation-height negatives |
-| Fixed fee proposition, `Fs.I3`, and `Rnext.I3` | I-3 | Miner-fee output and Claim liveness reserve | Fee diversion or underfunded Claim state | Fee, reserve, and top-up negatives |
+| Fixed fee proposition, `Fs.I3`, `Fe.I3 = 0`, `Fs + Fe <= totalStateDeductionMax`, and `Rnext.I3` | Family build and I-3 | Miner-fee output and Claim liveness reserve | Excessive family deduction, fee diversion, or underfunded Claim state | Build-time cap negative plus fee, reserve, and top-up negatives |
 | Ordered external-value equality and token-free fee/change paths | I-3 | Transaction conservation and token identity | Unaccounted value or protocol-token escape | Balanced positive, one-nanoERG drift, token negatives, and value mutant |
 | Buyer authorization and closed non-I-3 tags | I-3 | State transition authority | Unauthorized Claim opening or accidental branch activation | Missing/wrong proof and closed-tag negatives; authorization mutant |
 | Vars 1-6 are outside the I-3 ABI | I-3 | Future C-1 Bitcoin witness composition | Hidden coupling to irrelevant witness material | Wrong-typed vars 1-6 accepting control |
@@ -114,16 +114,19 @@ green.
 
 The current candidate source is
 `BitcoinRsBtcI3ClaimOpeningSpecification.scala`, SHA-256
-`3b4e4c562aa3449371a0dac7c3c91deed69dfc5379b611a3ac0049a899c3c8fc`.
-Its focused suite contains 12 properties and passes `12/12` independently on
+`73730da2146fefc3e7bb94801dea28e892baa53f332b687a2e530da638d01875`.
+Its focused suite contains 13 properties and passes `13/13` on
 Scala `2.11.12`, `2.12.21`, and `2.13.18`. The semantic negatives assert
 `CONTRACT_FALSE` through direct Sigma reduction, malformed typed access asserts
-`EVALUATION_FAILURE`, and missing or wrong buyer secrets assert `PROOF_FAILURE`.
+`EVALUATION_FAILURE` with its exact root-cause class, and missing or wrong buyer
+secrets assert the prover's witness-deficiency failure rather than a generic
+failed `Try`.
 
-The four source mutants each require one unique source occurrence and turn only
-their matching negative into an accepting transaction. They cover the D2 lower
-bound, Claim proposition binding, exact external-value closure, and buyer
-authorization.
+The four source mutants each require one unique occurrence within the emitted
+ErgoScript and turn their selected isolated control into an accepting
+transaction. They cover the D2 lower bound, Claim proposition binding, exact
+external-value closure, and buyer authorization. The remaining negative matrix
+is not claimed to have been rerun under each mutant.
 
 The provisional compiled measurements are:
 

@@ -1245,7 +1245,8 @@ class BitcoinRsBtcClaimStateSpineSpecification
         claimScript.substring(index + target.length))
   }
 
-  private lazy val claimScript: String =
+  private lazy val claimScript: String = {
+    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)
     s"""{
        |  // Context var 0: 0 = C-1, 1 = C-2, 2 = C-3.
        |  val branch = getVar[Byte](0).get
@@ -1440,4 +1441,5 @@ class BitcoinRsBtcClaimStateSpineSpecification
        |    sigmaProp(false)
        |  }
        |}""".stripMargin.replace("\r\n", "\n")
+  }
 }

@@ -23,7 +23,7 @@ discriminating Rule ID. The closed Phase-1 vocabulary is:
 | --- | --- | --- | --- |
 | `MANIFEST_LOAD` | `JSON_MANIFEST_LOADER` | `LOAD_ACCEPT`, `SCHEMA_REJECT`, `BINDING_REJECT`, `ISOLATION_REJECT` | Required of the Stage-3 loader; not yet produced by the Scala specs. |
 | `FIXTURE_CONSTRUCTION` | `SCALA_FIXTURE_BUILDER` | `BUILD_ACCEPT`, `CONSTRUCTION_FAILURE` | A construction exception is currently a test failure, not an expected contract rejection. The harness must capture it explicitly before this channel can close a row. |
-| `SIGMA_REDUCTION` | `ERGO_LIKE_TEST_INTERPRETER_V6` | `CONTRACT_TRUE`, `CONTRACT_FALSE`, `EVALUATION_FAILURE`, `PROOF_FAILURE` | Implemented by the current Scala harness. `PROOF_FAILURE` is a controlled subtype of interpreter failure and requires a proof-bearing fixture plus an accepting proof control. |
+| `SIGMA_REDUCTION` | `ERGO_LIKE_TEST_INTERPRETER_V6` | `CONTRACT_TRUE`, `CONTRACT_FALSE`, `EVALUATION_FAILURE`, `PROOF_FAILURE` | Implemented by the current Scala harness. `PROOF_FAILURE` requires a proof-bearing fixture, an accepting proof control, and a root cause identifying witness deficiency rather than pre-proof evaluation failure. |
 | `TARGET_NODE_VALIDATION` | `ERGO_REFERENCE_NODE` | `NODE_ACCEPT`, `NODE_REJECT` | Not observed in Phase 1. A row requiring this stage remains evidence-gated. |
 
 `REJECTED` is not a canonical category because it collapses contract-false,
@@ -57,11 +57,13 @@ schema, value equations, positives, negatives, costs, and proposition hash.
 The machine-readable pilot candidate table is
 `2026-08-05-rsbtc-base-family-bindings-candidate.json`. Its detached SHA-256
 is
-`01b97e371b0aff99d6b12308bea41b493d8bdd777bfe11041c68b2147e212472`.
+`dd3caa9da00075346ed735217c6f8dce9a0bf172bea92330e87ccc6ed6125824`.
 
 The table distinguishes three authority classes:
 
-1. `compiled_constant`: a typed literal consumed by the ErgoScript predicate;
+1. `compiled_constant`: a typed family literal consumed by the ErgoScript
+   predicate, or checked by a fail-closed family-emission rule when the relation
+   is statically decidable;
 2. `compiled_semantics`: a relation fixed by the branch code, such as output
    positions and optional-output rules;
 3. `build_manifest_integrity`: an off-chain identifier for reviewed build
@@ -71,6 +73,10 @@ An output-schema digest belongs to class 3. It can bind a canonical descriptor
 inside the build manifest, but the lifecycle does not read that digest on
 chain. The on-chain authority is the compiled output-schema predicate. No
 negative may claim contract enforcement by a manifest-only digest.
+
+A family-emission-only constant must declare that enforcement locus and cannot
+close a `SIGMA_REDUCTION` row. It can close only the manifest or fixture-build
+stage that actually refuses the invalid family generation.
 
 The current table is a pilot projection, not a deployment manifest. Only an
 implemented binding for the row's exact branch may close a

@@ -41,6 +41,10 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   private val minSatoshis = 250000L
   private val maxCreationHeightLag = 2
 
+  private val ExpectedRsBtcTokenIdHex = "1111111111111111111111111111111111111111111111111111111111111111"
+  private val ExpectedFeePropositionHex =
+    "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304"
+
   private val Phase1ProvisionalTreeSize = 1196
   private val Phase1ProvisionalTreeHash =
     "0168e8ca61fde3560f2c456b919f9826ad1471ac98cd6a56a328f7b7ddf3d285"
@@ -81,9 +85,19 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     result.get._1 shouldBe true
   }
 
+  property("Base/PLAIN pins pilot ABI literals and rejects excessive state deduction") {
+    Try(BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)).isSuccess shouldBe true
+    Try(BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee + 1L)).isFailure shouldBe true
+    Base16.encode(rsBtcTokenIdBytes) shouldBe ExpectedRsBtcTokenIdHex
+    Base16.encode(feeTree.bytes) shouldBe ExpectedFeePropositionHex
+  }
+
   property("I-3 pins D1 and the inclusive response-window boundaries") {
     val minD2 = currentHeight + responseMin + 1
     val maxD2 = currentHeight + responseMax + 1
+
+    minD2.toLong - currentHeight.toLong - 1L shouldBe responseMin.toLong
+    maxD2.toLong - currentHeight.toLong - 1L shouldBe responseMax.toLong
 
     assertContractTrue("D1", evaluateI3(evaluationHeight = d1, claimD2 = d1 + responseMin + 1))
     assertContractFalse(
@@ -131,10 +145,12 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
 
     assertEvaluationFailure(
       "missing mandatory register range",
-      evaluateI3(inputRegisters = Map.empty))
+      evaluateI3(inputRegisters = Map.empty),
+      classOf[NoSuchElementException])
     assertEvaluationFailure(
       "wrong-typed R8",
-      evaluateI3(inputRegisters = canonicalInsuredDealRegisters.updated(R8, IntConstant(d1))))
+      evaluateI3(inputRegisters = canonicalInsuredDealRegisters.updated(R8, IntConstant(d1))),
+      classOf[sigma.exceptions.InvalidType])
     assertContractFalse(
       "outpoint size",
       evaluateI3(inputRegisters = canonicalInsuredDealRegisters.updated(
@@ -259,7 +275,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     assertEvaluationFailure(
       "wrong-typed D2",
       evaluateI3(claimRegistersOverride = Some(
-        canonicalClaimRegisters.updated(R8, LongConstant(d2.toLong)))))
+        canonicalClaimRegisters.updated(R8, LongConstant(d2.toLong)))),
+      classOf[sigma.exceptions.InvalidType])
     assertContractFalse(
       "unexpected R9",
       evaluateI3(claimRegistersOverride = Some(
@@ -268,7 +285,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     assertEvaluationFailure(
       "wrong-typed unexpected R9",
       evaluateI3(claimRegistersOverride = Some(
-        canonicalClaimRegisters.updated(R9, IntConstant(1)))))
+        canonicalClaimRegisters.updated(R9, IntConstant(1)))),
+      classOf[sigma.exceptions.InvalidType])
     assertContractFalse(
       "wrong origin NFT",
       evaluateI3(claimTokens = ArraySeq(
@@ -307,7 +325,7 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
 
   property("I-3 conserves state value and isolates external funding") {
     assertContractFalse(
-      "successor reserve drain",
+      "successor below state-funded baseline",
       evaluateI3(
         claimValue = stateValue - stateFee - 1L,
         directVerification = true))
@@ -368,10 +386,12 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       evaluateI3(authorizationSecrets = Seq(alternateAuthorizationInput)))
     assertEvaluationFailure(
       "missing branch tag",
-      evaluateI3(extensionValuesOverride = Some(Map.empty)))
+      evaluateI3(extensionValuesOverride = Some(Map.empty)),
+      classOf[NoSuchElementException])
     assertEvaluationFailure(
       "wrong-typed branch tag",
-      evaluateI3(extensionValuesOverride = Some(Map(0.toByte -> IntConstant(2)))))
+      evaluateI3(extensionValuesOverride = Some(Map(0.toByte -> IntConstant(2)))),
+      classOf[sigma.exceptions.InvalidType])
     assertContractFalse(
       "I-1 remains closed",
       evaluateI3(branch = 0.toByte, directVerification = true))
@@ -643,14 +663,21 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       result.get._1 shouldBe false
     }
 
-  private def assertEvaluationFailure(label: String, result: Try[(Boolean, Long)]): Unit =
+  private def assertEvaluationFailure(
+      label: String,
+      result: Try[(Boolean, Long)],
+      expectedCause: Class[_ <: Throwable]): Unit =
     withClue(label) {
       result.isFailure shouldBe true
+      rootCause(result.failed.get).getClass shouldBe expectedCause
     }
 
   private def assertProofFailure(label: String, result: Try[(Boolean, Long)]): Unit =
     withClue(label) {
       result.isFailure shouldBe true
+      val cause = rootCause(result.failed.get)
+      cause shouldBe a[AssertionError]
+      cause.getMessage should startWith ("assertion failed: Tree root should be real")
     }
 
   private def pairConstant(
@@ -724,7 +751,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
         insuredDealScript.substring(first + target.length))
   }
 
-  private lazy val insuredDealScript: String =
+  private lazy val insuredDealScript: String = {
+    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)
     s"""{
       |  val branch = getVar[Byte](0).get
       |  val rsBtcTokenId = fromBase16("${Base16.encode(rsBtcTokenIdBytes)}")
@@ -865,4 +893,5 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       |    sigmaProp(false)
       |  }
       |}""".stripMargin.replace("\r\n", "\n")
+  }
 }
