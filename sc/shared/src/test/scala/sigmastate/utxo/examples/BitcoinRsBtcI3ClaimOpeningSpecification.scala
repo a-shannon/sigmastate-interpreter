@@ -45,6 +45,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   private val ExpectedRsBtcTokenIdHex = "1111111111111111111111111111111111111111111111111111111111111111"
   private val ExpectedFeePropositionHex =
     "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304"
+  private val ExpectedWrongFeeP2PkHex =
+    "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
   private val Phase1ProvisionalTreeSize = 1196
   private val Phase1ProvisionalTreeHash =
@@ -80,12 +82,27 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   private lazy val provisionalClaimHash = Blake2b256.hash(provisionalClaimTree.bytes)
   private lazy val insuredDealTree = compileV6(insuredDealScript)
   private lazy val feeTree = ErgoTreePredef.feeProposition()
+  private lazy val wrongFeeP2PkTree = ErgoTree.fromSigmaBoolean(
+    ErgoTree.headerWithVersion(ZeroHeader, 0),
+    buyerPayoutInput.publicImage)
 
   property("I-3 canonical Claim opening reduces to true") {
     val result = evaluateI3()
 
     result.isSuccess shouldBe true
     result.get._1 shouldBe true
+  }
+
+  property("I-3 F2C-4 uses a canonical wrong P2PK fee proposition") {
+    Base16.encode(wrongFeeP2PkTree.bytes) shouldBe ExpectedWrongFeeP2PkHex
+    Base16.encode(ErgoTree.fromBytes(wrongFeeP2PkTree.bytes).bytes) shouldBe
+      ExpectedWrongFeeP2PkHex
+    ExpectedWrongFeeP2PkHex should not be ExpectedFeePropositionHex
+
+    assertContractTrue("canonical fee proposition", evaluateI3())
+    assertContractFalse(
+      "canonical wrong P2PK fee proposition",
+      evaluateI3(feeTreeOverride = wrongFeeP2PkTree, directVerification = true))
   }
 
   property("Base/PLAIN I-3 emitter rejects excessive state deduction before source or tree emission") {

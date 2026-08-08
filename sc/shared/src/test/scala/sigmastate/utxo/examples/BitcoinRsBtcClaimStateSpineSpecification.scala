@@ -52,6 +52,8 @@ class BitcoinRsBtcClaimStateSpineSpecification
   private val StateSpineC3Cost = 1527L
   private val StateSpineC3ZeroFullCost = 1517L
   private val StateSpineC3ExternalCost = 1547L
+  private val ExpectedWrongFeeP2PkHex =
+    "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
   private val rsBtcTokenIdBytes = Array.fill(32)(0x11.toByte)
   private val rsBtcTokenId = Digest32Coll @@ rsBtcTokenIdBytes.toColl
@@ -82,6 +84,7 @@ class BitcoinRsBtcClaimStateSpineSpecification
   private lazy val sellerPayoutTree = ErgoTree.fromSigmaBoolean(
     ErgoTree.headerWithVersion(ZeroHeader, 0),
     sellerPayoutInput.publicImage)
+  private lazy val wrongFeeP2PkTree = buyerPayoutTree
   private lazy val v6BuyerPayoutTree = ErgoTree.fromSigmaBoolean(
     ErgoTree.headerWithVersion(ZeroHeader, V6SoftForkVersion),
     buyerPayoutInput.publicImage)
@@ -91,6 +94,18 @@ class BitcoinRsBtcClaimStateSpineSpecification
 
     result.isSuccess shouldBe true
     result.get._1 shouldBe true
+  }
+
+  property("Claim C-2 F2C-4 uses a canonical wrong P2PK fee proposition") {
+    Base16.encode(wrongFeeP2PkTree.bytes) shouldBe ExpectedWrongFeeP2PkHex
+    Base16.encode(ErgoTree.fromBytes(wrongFeeP2PkTree.bytes).bytes) shouldBe
+      ExpectedWrongFeeP2PkHex
+    ExpectedWrongFeeP2PkHex should not be Base16.encode(feeTree.bytes)
+
+    assertContractTrue("canonical fee proposition", evaluateC2())
+    assertContractFalse(
+      "canonical wrong P2PK fee proposition",
+      evaluateC2(feeTreeOverride = wrongFeeP2PkTree))
   }
 
   property("Claim C-2 pins the canonical P2PK proposition encoding") {
