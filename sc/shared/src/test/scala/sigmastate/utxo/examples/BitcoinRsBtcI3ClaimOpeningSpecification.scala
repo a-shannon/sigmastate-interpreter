@@ -65,6 +65,8 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
   private val rsBtcTokenIdBytes = Array.fill(32)(0x11.toByte)
   private val rsBtcTokenId = Digest32Coll @@ rsBtcTokenIdBytes.toColl
   private val originNftId = Digest32Coll @@ Array.fill(32)(0x22.toByte).toColl
+  private val alternateRsBtcTokenIdBytes = Array.fill(32)(0x33.toByte)
+  private val alternateRsBtcTokenId = Digest32Coll @@ alternateRsBtcTokenIdBytes.toColl
   private val insuredDealTokens = ArraySeq(
     (originNftId, 1L): Token,
     (rsBtcTokenId, collateralAmount): Token)
@@ -103,6 +105,119 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
     assertContractFalse(
       "canonical wrong P2PK fee proposition",
       evaluateI3(feeTreeOverride = wrongFeeP2PkTree, directVerification = true))
+  }
+
+  property("I-3 F2C-1 uses a collision-free family-token mismatch") {
+    val alternateTokenHex = Base16.encode(alternateRsBtcTokenIdBytes)
+    val alternateTokens = ArraySeq(
+      (originNftId, 1L): Token,
+      (alternateRsBtcTokenId, collateralAmount): Token)
+    val alternateFamilyTree = compileI3Mutant(
+      s"""fromBase16("$ExpectedRsBtcTokenIdHex")""",
+      s"""fromBase16("$alternateTokenHex")""")
+
+    (alternateRsBtcTokenId == originNftId) shouldBe false
+    (alternateRsBtcTokenId == rsBtcTokenId) shouldBe false
+    assertContractTrue("canonical family parent", evaluateI3())
+    assertContractFalse(
+      "fixture token differs from the compiled family token",
+      evaluateI3(
+        inputTokens = alternateTokens,
+        claimTokens = alternateTokens,
+        directVerification = true))
+    assertContractTrue(
+      "matched alternate family control",
+      evaluateI3(
+        inputTokens = alternateTokens,
+        claimTokens = alternateTokens,
+        contractTreeOverride = Some(alternateFamilyTree)))
+  }
+
+  property("I-3 F2C topology rows pin their reduction channels") {
+    val inputCountMutant = compileI3Mutant(
+      "val inputCountOk = INPUTS.size == 1 || INPUTS.size == 2",
+      "val inputCountOk = true")
+    assertContractTrue("one-input parent", evaluateI3())
+    assertContractFalse(
+      "three-input synthetic reduction",
+      evaluateI3(
+        externalInputValue = Some(1000000L),
+        includeThirdInput = true,
+        directVerification = true))
+    assertContractTrue(
+      "three-input guard mutant",
+      evaluateI3(
+        externalInputValue = Some(1000000L),
+        includeThirdInput = true,
+        contractTreeOverride = Some(inputCountMutant)))
+
+    assertEvaluationFailure(
+      "fee and Claim outputs swapped",
+      evaluateI3(swapPrimaryOutputs = true, directVerification = true),
+      classOf[NoSuchElementException])
+
+    assertContractTrue(
+      "executor-absent external parent",
+      evaluateI3(
+        externalInputValue = Some(4000000L),
+        feeValue = stateFee + 1000000L,
+        claimValue = stateValue,
+        changeValue = Some(2000000L)))
+    assertContractFalse(
+      "executor-present value-conserving child",
+      evaluateI3(
+        externalInputValue = Some(4000000L),
+        feeValue = stateFee + 1000000L,
+        claimValue = stateValue,
+        changeValue = Some(1000000L),
+        appendExtraOutput = true,
+        directVerification = true))
+
+    val changeIndexMutant = compileI3Mutant(
+      "val changeOut = OUTPUTS.getOrElse(2, SELF)",
+      "val changeOut = OUTPUTS.getOrElse(3, SELF)")
+    val changeIndexParent = evaluateI3(
+      externalInputValue = Some(3000000L),
+      feeValue = stateFee + 1000000L,
+      claimValue = stateValue,
+      changeValue = Some(1000000L))
+    assertContractTrue("change-index parent", changeIndexParent)
+    assertContractFalse(
+      "change-index family mutant",
+      evaluateI3(
+        externalInputValue = Some(3000000L),
+        feeValue = stateFee + 1000000L,
+        claimValue = stateValue,
+        changeValue = Some(1000000L),
+        directVerification = true,
+        contractTreeOverride = Some(changeIndexMutant)))
+  }
+
+  property("I-3 F2C numeric bindings use executable boundary controls") {
+    val alternateStateFeeFamilyTree =
+      compileInsuredDealFamily(stateFee - 1L, compileV6)
+    assertContractTrue("state-fee parent", evaluateI3())
+    assertContractFalse(
+      "lower compiled state fee",
+      evaluateI3(
+        directVerification = true,
+        contractTreeOverride = Some(alternateStateFeeFamilyTree)))
+
+    val reserveMutant = compileI3Mutant(
+      s"val claimReserveFloor = ${claimReserveFloor}L",
+      s"val claimReserveFloor = ${claimReserveFloor + 1L}L")
+    assertContractTrue(
+      "reserve-floor boundary parent",
+      evaluateI3(
+        inputValue = stateFee + claimReserveFloor,
+        claimValue = claimReserveFloor))
+    assertContractFalse(
+      "reserve-floor family mutant",
+      evaluateI3(
+        inputValue = stateFee + claimReserveFloor,
+        claimValue = claimReserveFloor,
+        directVerification = true,
+        contractTreeOverride = Some(reserveMutant)))
   }
 
   property("Base/PLAIN I-3 emitter rejects excessive state deduction before source or tree emission") {
@@ -590,6 +705,7 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       changeValue: Option[Long] = None,
       changeTokens: ArraySeq[Token] = ArraySeq.empty[Token],
       appendExtraOutput: Boolean = false,
+      swapPrimaryOutputs: Boolean = false,
       includeThirdInput: Boolean = false,
       includeDataInput: Boolean = false,
       branch: Byte = 2.toByte,
@@ -687,7 +803,12 @@ class BitcoinRsBtcI3ClaimOpeningSpecification
       IndexedSeq(stateInput) ++ externalInputValue.map(_ => externalInput) ++
         (if (includeThirdInput) IndexedSeq(thirdInput) else IndexedSeq.empty)
     }
-    val outputs = IndexedSeq(claimOutput, feeOutput) ++ changeOutput ++
+    val primaryOutputs = if (swapPrimaryOutputs) {
+      IndexedSeq(feeOutput, claimOutput)
+    } else {
+      IndexedSeq(claimOutput, feeOutput)
+    }
+    val outputs = primaryOutputs ++ changeOutput ++
       (if (appendExtraOutput) IndexedSeq(extraOutput) else IndexedSeq.empty)
     val dataInputs = if (includeDataInput) IndexedSeq(DataInput(dataBox.id)) else IndexedSeq.empty
     val dataBoxes = if (includeDataInput) IndexedSeq(dataBox) else IndexedSeq.empty

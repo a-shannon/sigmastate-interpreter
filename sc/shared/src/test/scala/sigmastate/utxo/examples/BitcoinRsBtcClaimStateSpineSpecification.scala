@@ -58,7 +58,8 @@ class BitcoinRsBtcClaimStateSpineSpecification
   private val rsBtcTokenIdBytes = Array.fill(32)(0x11.toByte)
   private val rsBtcTokenId = Digest32Coll @@ rsBtcTokenIdBytes.toColl
   private val originNftId = Digest32Coll @@ Array.fill(32)(0x22.toByte).toColl
-  private val alternateTokenId = Digest32Coll @@ Array.fill(32)(0x33.toByte).toColl
+  private val alternateTokenIdBytes = Array.fill(32)(0x33.toByte)
+  private val alternateTokenId = Digest32Coll @@ alternateTokenIdBytes.toColl
   private val claimTokens = ArraySeq(
     (originNftId, 1L): Token,
     (rsBtcTokenId, collateralAmount): Token)
@@ -106,6 +107,129 @@ class BitcoinRsBtcClaimStateSpineSpecification
     assertContractFalse(
       "canonical wrong P2PK fee proposition",
       evaluateC2(feeTreeOverride = wrongFeeP2PkTree))
+  }
+
+  property("Claim C-2 F2C-1 uses a collision-free family-token mismatch") {
+    val alternateTokenHex = Base16.encode(alternateTokenIdBytes)
+    val alternateTokens = ArraySeq(
+      (originNftId, 1L): Token,
+      (alternateTokenId, collateralAmount): Token)
+    val alternatePayoutTokens = ArraySeq(
+      (alternateTokenId, collateralAmount): Token)
+    val alternateFamilyTree = compileClaimMutant(
+      s"""fromBase16("${Base16.encode(rsBtcTokenIdBytes)}")""",
+      s"""fromBase16("$alternateTokenHex")""")
+
+    (alternateTokenId == originNftId) shouldBe false
+    (alternateTokenId == rsBtcTokenId) shouldBe false
+    assertContractTrue("canonical family parent", evaluateC2())
+    assertContractFalse(
+      "fixture token differs from the compiled family token",
+      evaluateC2(
+        inputTokens = alternateTokens,
+        buyerTokens = alternatePayoutTokens))
+    assertContractTrue(
+      "matched alternate family control",
+      evaluateC2(
+        inputTokens = alternateTokens,
+        buyerTokens = alternatePayoutTokens,
+        contractTreeOverride = Some(alternateFamilyTree)))
+  }
+
+  property("Base/PLAIN Claim emitter rejects excessive state deduction before source or tree emission") {
+    val acceptedSource = Try(emitClaimScript(stateFee))
+    acceptedSource.isSuccess shouldBe true
+    acceptedSource.get shouldBe claimScript
+
+    var compilerInvoked = false
+    val acceptedTree = compileClaimFamily(stateFee, { source =>
+      compilerInvoked = true
+      compileV6(source)
+    })
+    compilerInvoked shouldBe true
+    acceptedTree.bytes shouldBe claimTree.bytes
+
+    val excessiveStateFee = stateFee + 1L
+    val rejectedSource = Try(emitClaimScript(excessiveStateFee))
+    assertFamilyEmissionFailure("excessive Claim source", rejectedSource)
+    rejectedSource.toOption shouldBe None
+
+    compilerInvoked = false
+    val rejectedTree = Try(compileClaimFamily(excessiveStateFee, { source =>
+      compilerInvoked = true
+      compileV6(source)
+    }))
+    assertFamilyEmissionFailure("excessive Claim tree", rejectedTree)
+    rejectedTree.toOption shouldBe None
+    compilerInvoked shouldBe false
+  }
+
+  property("Claim C-2 F2C topology rows pin their reduction channels") {
+    assertContractTrue("canonical output-order parent", evaluateC2())
+    assertContractFalse(
+      "fee and buyer outputs swapped",
+      evaluateC2(swapPrimaryOutputs = true))
+
+    assertContractTrue(
+      "executor-absent external parent",
+      evaluateC2(
+        externalInputValue = Some(4000000L),
+        feeValue = stateFee + 1000000L,
+        buyerValue = stateValue,
+        changeValue = Some(2000000L)))
+    assertContractFalse(
+      "executor-present value-conserving child",
+      evaluateC2(
+        externalInputValue = Some(4000000L),
+        feeValue = stateFee + 1000000L,
+        buyerValue = stateValue,
+        changeValue = Some(1000000L),
+        appendExtraOutput = true))
+
+    val changeIndexMutant = compileClaimMutantAtOccurrence(
+      "val changeOut = OUTPUTS.getOrElse(2, SELF)",
+      "val changeOut = OUTPUTS.getOrElse(3, SELF)",
+      occurrence = 0,
+      expectedOccurrences = 1)
+    assertContractTrue(
+      "change-index parent",
+      evaluateC2(
+        externalInputValue = Some(3000000L),
+        feeValue = stateFee + 1000000L,
+        buyerValue = stateValue,
+        changeValue = Some(1000000L)))
+    assertContractFalse(
+      "change-index family mutant",
+      evaluateC2(
+        externalInputValue = Some(3000000L),
+        feeValue = stateFee + 1000000L,
+        buyerValue = stateValue,
+        changeValue = Some(1000000L),
+        contractTreeOverride = Some(changeIndexMutant)))
+  }
+
+  property("Claim C-2 F2C numeric bindings use executable boundary controls") {
+    val alternateStateFeeFamilyTree =
+      compileClaimFamily(stateFee - 1L, compileV6)
+    assertContractTrue("state-fee parent", evaluateC2())
+    assertContractFalse(
+      "lower compiled state fee",
+      evaluateC2(contractTreeOverride = Some(alternateStateFeeFamilyTree)))
+
+    val payoutFloorMutant = compileClaimMutant(
+      s"val singlePayoutFloor = ${singlePayoutFloor}L",
+      s"val singlePayoutFloor = ${singlePayoutFloor + 1L}L")
+    assertContractTrue(
+      "single-payout-floor boundary parent",
+      evaluateC2(
+        inputValue = stateFee + singlePayoutFloor,
+        buyerValue = singlePayoutFloor))
+    assertContractFalse(
+      "single-payout-floor family mutant",
+      evaluateC2(
+        inputValue = stateFee + singlePayoutFloor,
+        buyerValue = singlePayoutFloor,
+        contractTreeOverride = Some(payoutFloorMutant)))
   }
 
   property("Claim C-2 pins the canonical P2PK proposition encoding") {
@@ -1028,6 +1152,7 @@ class BitcoinRsBtcClaimStateSpineSpecification
       changeTokens: ArraySeq[Token] = ArraySeq.empty[Token],
       changeRegisters: Map[NonMandatoryRegisterId, EvaluatedValue[_ <: SType]] = Map.empty,
       appendExtraOutput: Boolean = false,
+      swapPrimaryOutputs: Boolean = false,
       includeThirdInput: Boolean = false,
       includeDataInput: Boolean = false,
       branch: Byte = 1.toByte,
@@ -1125,7 +1250,12 @@ class BitcoinRsBtcClaimStateSpineSpecification
       IndexedSeq(stateInput) ++ externalInputValue.map(_ => externalInput) ++
         (if (includeThirdInput) IndexedSeq(thirdInput) else IndexedSeq.empty)
     }
-    val outputs = IndexedSeq(buyerOutput, feeOutput) ++ changeOutput ++
+    val primaryOutputs = if (swapPrimaryOutputs) {
+      IndexedSeq(feeOutput, buyerOutput)
+    } else {
+      IndexedSeq(buyerOutput, feeOutput)
+    }
+    val outputs = primaryOutputs ++ changeOutput ++
       (if (appendExtraOutput) IndexedSeq(extraOutput) else IndexedSeq.empty)
     val dataInputs = if (includeDataInput) IndexedSeq(DataInput(dataBox.id)) else IndexedSeq.empty
     val dataBoxes = if (includeDataInput) IndexedSeq(dataBox) else IndexedSeq.empty
@@ -1166,6 +1296,14 @@ class BitcoinRsBtcClaimStateSpineSpecification
   private def assertEvaluationFailure(label: String, result: Try[(Boolean, Long)]): Unit =
     withClue(label) {
       result.isFailure shouldBe true
+    }
+
+  private def assertFamilyEmissionFailure(label: String, result: Try[_]): Unit =
+    withClue(label) {
+      result.isFailure shouldBe true
+      result.failed.get.getClass shouldBe classOf[IllegalArgumentException]
+      result.failed.get.getMessage shouldBe
+        "requirement failed: The state-funded miner fee exceeds the family deduction cap"
     }
 
   private def assertProofFailure(label: String, result: Try[(Boolean, Long)]): Unit =
@@ -1260,14 +1398,14 @@ class BitcoinRsBtcClaimStateSpineSpecification
         claimScript.substring(index + target.length))
   }
 
-  private lazy val claimScript: String = {
-    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFee)
+  private def emitClaimScript(stateFeeValue: Long): String = {
+    BitcoinRsBtcBasePlainFamilyPolicy.requireValidStateDeduction(stateFeeValue)
     s"""{
        |  // Context var 0: 0 = C-1, 1 = C-2, 2 = C-3.
        |  val branch = getVar[Byte](0).get
        |  val rsBtcTokenId = fromBase16("${Base16.encode(rsBtcTokenIdBytes)}")
        |  val feePropositionBytes = fromBase16("${Base16.encode(feeTree.bytes)}")
-       |  val stateFee = ${stateFee}L
+       |  val stateFee = ${stateFeeValue}L
        |  val singlePayoutFloor = ${singlePayoutFloor}L
        |  val mutualPayoutFloor = ${mutualPayoutFloor}L
        |  val maxCreationHeightLag = $maxCreationHeightLag
@@ -1457,4 +1595,11 @@ class BitcoinRsBtcClaimStateSpineSpecification
        |  }
        |}""".stripMargin.replace("\r\n", "\n")
   }
+
+  private def compileClaimFamily(
+      stateFeeValue: Long,
+      compiler: String => ErgoTree): ErgoTree =
+    compiler(emitClaimScript(stateFeeValue))
+
+  private lazy val claimScript: String = emitClaimScript(stateFee)
 }
