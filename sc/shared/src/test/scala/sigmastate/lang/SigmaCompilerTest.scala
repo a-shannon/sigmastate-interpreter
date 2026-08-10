@@ -354,11 +354,25 @@ class SigmaCompilerTest extends CompilerTestingCommons with LangTests with Objec
     // where a name resolves to an Ident of the same name, makes the binder's reduce
     // strategy loop forever and overflow the stack. SigmaCompiler.typecheck must catch
     // the StackOverflowError and rethrow it as a checked CompilerException instead of
-    // letting it escalate to a fatal JVM error.
+    // letting it escalate to a fatal runtime error.
     val compiler = SigmaCompiler(TestnetNetworkPrefix)
     val recursiveEnv: ScriptEnv = Map("x" -> Ident("x", NoType))
     val parsed = compiler.parse("x")
     val e = the[CompilerException] thrownBy compiler.typecheck(recursiveEnv, parsed)
     e.getMessage should include("too complex or recursive")
+    e.getCause should not be null
+  }
+
+  property("compiler is still usable after a stack overflow is caught") {
+    // Ensure that catching a stack overflow does not corrupt the compiler/builder state
+    // so that subsequent compilations on the same instance succeed.
+    val compiler = SigmaCompiler(TestnetNetworkPrefix)
+    val recursiveEnv: ScriptEnv = Map("x" -> Ident("x", NoType))
+    val parsed = compiler.parse("x")
+    the[CompilerException] thrownBy compiler.typecheck(recursiveEnv, parsed)
+
+    // Reuse the same compiler for a normal expression.
+    compiler.typecheck(Map.empty, compiler.parse("1 + 2")) shouldBe
+      Plus(IntConstant(1), IntConstant(2))
   }
 }

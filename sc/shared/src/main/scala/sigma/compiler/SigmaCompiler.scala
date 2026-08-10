@@ -63,35 +63,24 @@ class SigmaCompiler private(settings: CompilerSettings) {
 
   /** Parses the given ErgoScript source code and produces expression tree. */
   def parse(x: String): SValue = {
-    SigmaParser(x) match {
-      case Success(v, _) => v
-      case f: Parsed.Failure =>
-        throw new ParserException(s"Syntax error: $f", Some(SourceContext.fromParserFailure(f)))
+    SigmaCompiler.checkStackOverflow(source = None) {
+      SigmaParser(x) match {
+        case Success(v, _) => v
+        case f: Parsed.Failure =>
+          throw new ParserException(s"Syntax error: $f", Some(SourceContext.fromParserFailure(f)))
+      }
     }
   }
 
   /** Typechecks the given parsed expression and assigns types for all sub-expressions. */
   def typecheck(env: ScriptEnv, parsed: SValue): Value[SType] = {
-    try {
+    SigmaCompiler.checkStackOverflow(parsed.sourceContext.toOption) {
       val predefinedFuncRegistry = new PredefinedFuncRegistry(builder)
       val binder = new SigmaBinder(env, builder, networkPrefix, predefinedFuncRegistry)
       val bound = binder.bind(parsed)
       val typeEnv = env.collect { case (k, v: SType) => k -> v }
       val typer = new SigmaTyper(builder, predefinedFuncRegistry, typeEnv, settings.lowerMethodCalls)
-      val typed = typer.typecheck(bound)
-      typed
-    } catch {
-      // Rethrow OutOfMemoryError: it is not safe to continue after the heap is exhausted.
-      case oom: OutOfMemoryError => throw oom
-      // Wrap a stack overflow into a checked CompilerException so that a
-      // malformed/pathological script results in a normal compilation error instead of
-      // a fatal runtime error. Note that on the JVM a stack overflow is signalled as a
-      // StackOverflowError (a VirtualMachineError), while on Scala.js it surfaces as a
-      // scala.scalajs.js.JavaScriptException wrapping a native RangeError.
-      case t: Throwable if SigmaCompiler.isStackOverflow(t) =>
-        throw new CompilerException(
-          s"Script compilation failed (stack overflow): script is too complex or recursive",
-          parsed.sourceContext.toOption)
+      typer.typecheck(bound)
     }
   }
 
@@ -109,14 +98,16 @@ class SigmaCompiler private(settings: CompilerSettings) {
 
   /** Compiles the given typed expression. */
   def compileTyped(env: ScriptEnv, typedExpr: SValue)(implicit IR: IRContext): CompilerResult[IR.type] = {
-    val placeholdersEnv = env
-        .collect { case (name, t: SType) => name -> t }
-        .zipWithIndex
-        .map { case ((name, t), index) => name -> ConstantPlaceholder(index, t) }
-        .toMap
-    val compiledGraph = IR.buildGraph(env ++ placeholdersEnv, typedExpr)
-    val compiledTree = IR.buildTree(compiledGraph)
-    CompilerResult(env, "<no source code>", compiledGraph, compiledTree)
+    SigmaCompiler.checkStackOverflow(typedExpr.sourceContext.toOption) {
+      val placeholdersEnv = env
+          .collect { case (name, t: SType) => name -> t }
+          .zipWithIndex
+          .map { case ((name, t), index) => name -> ConstantPlaceholder(index, t) }
+          .toMap
+      val compiledGraph = IR.buildGraph(env ++ placeholdersEnv, typedExpr)
+      val compiledTree = IR.buildTree(compiledGraph)
+      CompilerResult(env, "<no source code>", compiledGraph, compiledTree)
+    }
   }
 
   /** Compiles the given parsed contract source. */
@@ -173,25 +164,61 @@ object SigmaCompiler {
 
   /** Returns true if the given throwable represents a stack overflow.
     *
-    * On the JVM a stack overflow is signalled as a [[StackOverflowError]] (a
-    * [[VirtualMachineError]]). On Scala.js there is no StackOverflowError; instead the
-    * JavaScript engine throws a native `RangeError` ("Maximum call stack size exceeded"),
-    * which Scala.js wraps into a `scala.scalajs.js.JavaScriptException`. Since shared code
-    * cannot reference JS-only types, the JS case is detected by inspecting the exception
-    * class name and message.
+    * On the JVM a stack overflow is signalled as a [[StackOverflowError]]. On Scala.js
+    * there is no `StackOverflowError`; instead the JavaScript engine throws a native
+    * `RangeError` ("Maximum call stack size exceeded" / "too much recursion"), which
+    * Scala.js wraps into a `scala.scalajs.js.JavaScriptException`. Since shared code cannot
+    * reference JS-only types, the JS case is detected by inspecting the exception class name
+    * and message.
+    *
+    * The overload taking `isJVM` is package-private so tests can assert both platform
+    * predicates without running on the actual platform.
     */
-  private def isStackOverflow(t: Throwable): Boolean = {
-    if (Environment.current.isJVM)
-      t.isInstanceOf[VirtualMachineError] && !t.isInstanceOf[OutOfMemoryError]
+  private[sigma] def isStackOverflow(t: Throwable): Boolean =
+    isStackOverflow(t, Environment.current.isJVM)
+
+  private[sigma] def isStackOverflow(t: Throwable, isJVM: Boolean): Boolean = {
+    if (isJVM)
+      t.isInstanceOf[StackOverflowError]
     else {
       // Scala.js: detect the native RangeError wrapped in js.JavaScriptException.
       val className = t.getClass.getName
       val message = String.valueOf(t.getMessage)
       className.contains("JavaScriptException") &&
-        (message.contains("Maximum call stack size exceeded") ||
-          message.contains("call stack size exceeded") ||
-          message.contains("too much recursion") ||
-          message.contains("RangeError"))
+        (message.contains("call stack size exceeded") ||
+          message.contains("too much recursion"))
+    }
+  }
+
+  /** Creates a [[CompilerException]] for a stack-overflow condition, preserving the
+    * original throwable as its cause.
+    */
+  private[sigma] def compilerStackOverflowException(
+      source: Option[SourceContext],
+      cause: Throwable): CompilerException = {
+    new CompilerException(
+      "Script compilation failed (stack overflow): script is too complex or recursive",
+      source,
+      Some(cause))
+  }
+
+  /** Runs the given computation and converts a stack overflow into a recoverable
+    * [[CompilerException]] while rethrowing all unrelated throwables (including
+    * [[OutOfMemoryError]]) unchanged.
+    */
+  private def checkStackOverflow[A](source: Option[SourceContext])(body: => A): A = {
+    try {
+      body
+    } catch {
+      // Convert a stack overflow (JVM StackOverflowError or JS RangeError) into a checked
+      // CompilerException so that a malformed/pathological script results in a normal
+      // compilation error instead of a fatal runtime error.
+      case t: Throwable if isStackOverflow(t) =>
+        throw compilerStackOverflowException(source, t)
+      // Everything else (OutOfMemoryError, InternalError, UnknownError,
+      // InterruptedException, ordinary exceptions, etc.) is unrelated to recursion depth
+      // and must propagate unchanged.
+      case t: Throwable => throw t
     }
   }
 
