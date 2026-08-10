@@ -372,7 +372,7 @@ class SigmaCompilerTest extends CompilerTestingCommons with LangTests with Objec
     the[CompilerException] thrownBy compiler.typecheck(recursiveEnv, parsed)
 
     // Reuse the same compiler for a normal expression.
-    compiler.typecheck(Map.empty, compiler.parse("1 + 2")) shouldBe
+    compiler.typecheck(Map.empty[String, Any], compiler.parse("1 + 2")) shouldBe
       Plus(IntConstant(1), IntConstant(2))
   }
 }
