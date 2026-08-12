@@ -129,35 +129,42 @@ class BitcoinTxParsingExampleSpecification extends CompilerTestingCommons
       |  val nInputsRes = readVarInt(4)
       |  val nInputs = nInputsRes._1
       |  val inputsStart = 4 + nInputsRes._2
+      |  val inputCountOk = nInputs <= 10
       |
-      |  // skip the inputs: each is prevTxId(32) + vout(4) + scriptSig(varint-prefixed) + sequence(4)
-      |  val outCountOff = maxInputs.fold(inputsStart, { (off: Int, i: Int) =>
-      |    if (i < nInputs) {
-      |      val sLen = readVarInt(off + 36)
-      |      off + 36 + sLen._2 + sLen._1 + 4
-      |    } else off
-      |  })
+      |  // Only scan inputs when the count is within the supported bound; otherwise the
+      |  // transaction is malformed/too large and the contract must reject.
+      |  val outCountOff = if (inputCountOk) {
+      |    maxInputs.fold(inputsStart, { (off: Int, i: Int) =>
+      |      if (i < nInputs) {
+      |        val sLen = readVarInt(off + 36)
+      |        off + 36 + sLen._2 + sLen._1 + 4
+      |      } else off
+      |    })
+      |  } else inputsStart
       |
       |  // read the output count and scan the outputs: each is value(8) + scriptPubKey(varint-prefixed)
-      |  val nOutputsRes = readVarInt(outCountOff)
+      |  val nOutputsRes = if (inputCountOk) readVarInt(outCountOff) else (0, 0)
       |  val nOutputs = nOutputsRes._1
-      |  val outputsStart = outCountOff + nOutputsRes._2
+      |  val outputCountOk = inputCountOk && nOutputs <= 10
       |
-      |  val scanRes = maxOutputs.fold((outputsStart, false), { (acc: (Int, Boolean), i: Int) =>
-      |    if (i < nOutputs) {
-      |      val off = acc._1
-      |      val sLen = readVarInt(off + 8)
-      |      val scriptStart = off + 8 + sLen._2
-      |      val scriptEnd = scriptStart + sLen._1
-      |      val script = tx.slice(scriptStart, scriptEnd)
-      |      (scriptEnd, acc._2 || sha256(script) == expectedScriptHash)
-      |    } else acc
-      |  })
+      |  val outputsStart = outCountOff + nOutputsRes._2
+      |  val scanRes = if (outputCountOk) {
+      |    maxOutputs.fold((outputsStart, false), { (acc: (Int, Boolean), i: Int) =>
+      |      if (i < nOutputs) {
+      |        val off = acc._1
+      |        val sLen = readVarInt(off + 8)
+      |        val scriptStart = off + 8 + sLen._2
+      |        val scriptEnd = scriptStart + sLen._1
+      |        val script = tx.slice(scriptStart, scriptEnd)
+      |        (scriptEnd, acc._2 || sha256(script) == expectedScriptHash)
+      |      } else acc
+      |    })
+      |  } else (outputsStart, false)
       |
       |  // the whole transaction must be consumed, up to the final lockTime (4 bytes)
-      |  val parsedAll = scanRes._1 + 4 == tx.size
+      |  val parsedAll = if (outputCountOk) scanRes._1 + 4 == tx.size else false
       |
-      |  sigmaProp(idOk && nInputs <= 10 && nOutputs <= 10 && parsedAll && scanRes._2)
+      |  sigmaProp(idOk && inputCountOk && outputCountOk && parsedAll && scanRes._2)
       |}""".stripMargin
 
   /** Creates a box guarded by the contract with the given expected txid (R4) and
