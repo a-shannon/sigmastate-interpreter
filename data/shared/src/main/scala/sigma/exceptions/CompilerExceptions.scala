@@ -15,6 +15,10 @@ class CompilerException(
     cause: Option[Throwable] = None
 ) extends SigmaException(message, cause) {
 
+  def this(message: String) = this(message, None, None)
+
+  def this(message: String, source: Option[SourceContext]) = this(message, source, None)
+
   override def getMessage: String = source.map { srcCtx =>
     val lineNumberStrPrefix = s"line ${srcCtx.line}: "
     "\n" + lineNumberStrPrefix +
@@ -32,7 +36,12 @@ class BinderException(
     message: String,
     source: Option[SourceContext] = None,
     cause: Option[Throwable] = None
-) extends CompilerException(message, source, cause)
+) extends CompilerException(message, source, cause) {
+
+  def this(message: String) = this(message, None, None)
+
+  def this(message: String, source: Option[SourceContext]) = this(message, source, None)
+}
 
 /** Exception thrown during the type checking phase of the compiler.
   *
@@ -44,7 +53,12 @@ class TyperException(
     message: String,
     source: Option[SourceContext] = None,
     cause: Option[Throwable] = None
-) extends CompilerException(message, source, cause)
+) extends CompilerException(message, source, cause) {
+
+  def this(message: String) = this(message, None, None)
+
+  def this(message: String, source: Option[SourceContext]) = this(message, source, None)
+}
 
 /** Exception thrown during the building phase of the compiler.
   *
@@ -56,7 +70,12 @@ class BuilderException(
     message: String,
     source: Option[SourceContext] = None,
     cause: Option[Throwable] = None
-) extends CompilerException(message, source, cause)
+) extends CompilerException(message, source, cause) {
+
+  def this(message: String) = this(message, None, None)
+
+  def this(message: String, source: Option[SourceContext]) = this(message, source, None)
+}
 
 /** Exception thrown during graph building.
   *
@@ -68,7 +87,13 @@ class GraphBuildingException(
     message: String,
     source: Option[SourceContext] = None,
     cause: Option[Throwable] = None
-) extends CompilerException(message, source, cause)
+) extends CompilerException(message, source, cause) {
+
+  def this(message: String) = this(message, None, None)
+
+  def this(message: String, source: Option[SourceContext]) = this(message, source, None)
+
+}
 
 
 

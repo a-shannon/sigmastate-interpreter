@@ -271,7 +271,8 @@ class BitcoinTxParsingAmountBindingSpecification extends CompilerTestingCommons
       verifier.verify(emptyEnv, tree, ctx.withExtension(pr.extension), pr.proof, fakeMessage)
         .getOrThrow._1 shouldBe true
     } else {
-      res.isFailure shouldBe true
+      val ex = res.failed.get
+      ex.getMessage should include("Script reduced to false")
     }
   }
 
