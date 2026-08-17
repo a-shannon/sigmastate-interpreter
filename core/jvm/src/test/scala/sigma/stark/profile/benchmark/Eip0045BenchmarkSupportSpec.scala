@@ -5,25 +5,33 @@
  */
 package sigma.stark.profile.benchmark
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
 
 class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
   test("argument parsing is bounded, explicit, and deterministic") {
-    parseArgs(Array.empty) shouldBe Right(Config(15, 100, None, None, "unrecorded"))
+    parseArgs(Array.empty) shouldBe
+      Right(Config(15, 100, None, None, "unrecorded", None, None))
     parseArgs(Array(
       "--sample-rounds", "7",
       "--warmup-rounds", "0",
       "--cpu-model", "Reference CPU",
       "--implementation-revision", "commit:0123456789abcdef",
+      "--campaign-manifest", "campaign.json",
+      "--campaign-run-id", "host-a:run-01",
       "--output", "evidence.json")) shouldBe
       Right(Config(
         0,
         7,
         Some("evidence.json"),
         Some("Reference CPU"),
-        "commit:0123456789abcdef"))
+        "commit:0123456789abcdef",
+        Some("campaign.json"),
+        Some("host-a:run-01")))
 
     parseArgs(Array("--sample-rounds", "0")) shouldBe
       Left("--sample-rounds must be positive")
@@ -40,7 +48,82 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       Left("duplicate option --cpu-model")
     parseArgs(Array("--implementation-revision", " ")) shouldBe
       Left("--implementation-revision must not be empty")
+    parseArgs(Array("--implementation-revision", "x" * 257)) shouldBe
+      Left("--implementation-revision must be at most 256 characters")
+    parseArgs(Array("--implementation-revision", "commit:\n00")) shouldBe
+      Left("--implementation-revision must not contain control characters")
+    parseArgs(Array("--implementation-revision", "commit:\u007f00")) shouldBe
+      Left("--implementation-revision must not contain control characters")
+    parseArgs(Array("--campaign-manifest", "campaign.json")) shouldBe
+      Left("--campaign-manifest and --campaign-run-id must be supplied together")
+    parseArgs(Array("--campaign-run-id", "run-01")) shouldBe
+      Left("--campaign-manifest and --campaign-run-id must be supplied together")
+    parseArgs(Array(
+      "--campaign-manifest", "campaign.json",
+      "--campaign-run-id", "run-01")) shouldBe
+      Left("campaign-bound runs require a recorded --implementation-revision")
+    parseArgs(Array(
+      "--implementation-revision", "commit:00",
+      "--campaign-manifest", "campaign.json",
+      "--campaign-run-id", "contains space")) shouldBe
+      Left("--campaign-run-id must be 1-128 characters using only ASCII letters, digits, '.', '_', ':', or '-'")
+    parseArgs(Array(
+      "--implementation-revision", "commit:00",
+      "--campaign-manifest", "campaign.json",
+      "--campaign-manifest", "other.json")) shouldBe
+      Left("duplicate option --campaign-manifest")
+    parseArgs(Array(
+      "--implementation-revision", "commit:00",
+      "--campaign-manifest", "campaign.json",
+      "--campaign-run-id", "run-01",
+      "--campaign-run-id", "run-02")) shouldBe
+      Left("duplicate option --campaign-run-id")
     parseArgs(Array("--unknown")) shouldBe Left("unknown option --unknown")
+  }
+
+  test("campaign binding hashes exact bounded bytes without retaining a path") {
+    val first = campaignBindingFromBytes("host-a:run-01", "manifest\n".getBytes(StandardCharsets.UTF_8))
+    val changed = campaignBindingFromBytes("host-a:run-01", "manifesU\n".getBytes(StandardCharsets.UTF_8))
+    first shouldBe Right(CampaignBinding(
+      "host-a:run-01",
+      9,
+      "7021e610a5f62eefd01830fea68e5fa180e8cf017c08ea0890c326b2854ebc96"))
+    changed should not be first
+    changed match {
+      case Right(value) => value.manifestByteLength shouldBe 9
+      case Left(detail) => fail(detail)
+    }
+    campaignBindingFromBytes("bad run", Array[Byte](1)) shouldBe
+      Left("campaign run ID is invalid")
+    campaignBindingFromBytes("run-01", Array.empty[Byte]) shouldBe
+      Left("campaign manifest is empty")
+    campaignBindingFromBytes(
+      "run-01",
+      new Array[Byte](MaxCampaignManifestBytes + 1)) shouldBe
+      Left("campaign manifest exceeds 1048576 bytes")
+  }
+
+  test("JVM input-argument identity binds order and element boundaries") {
+    val identity = jvmInputArgumentsIdentity(Vector("-Xms4g", "-XX:+UseG1GC"))
+    identity shouldBe Right(JvmInputArgumentsIdentity(
+      2,
+      "5c04a86bfc85463c5a6b66a6b0e51fb54d0c80cc09946b47ae03da88ce73bca3"))
+    jvmInputArgumentsIdentity(Vector("-XX:+UseG1GC", "-Xms4g")) should not be identity
+    jvmInputArgumentsIdentity(Vector("ab", "c")) should not be
+      jvmInputArgumentsIdentity(Vector("a", "bc"))
+    jvmInputArgumentsIdentity(Vector("ok", null)) shouldBe
+      Left("JVM input argument at index 1 is null")
+    jvmInputArgumentsIdentity(Vector.fill(MaxJvmInputArguments + 1)("")) shouldBe
+      Left("JVM input argument count exceeds 1024")
+    jvmInputArgumentsIdentity(Vector("x" * (MaxJvmInputArgumentBytes + 1))) shouldBe
+      Left("JVM input argument at index 0 exceeds 65536 characters before UTF-8 encoding")
+    jvmInputArgumentsIdentity(Vector("é" * 32769)) shouldBe
+      Left("JVM input argument at index 0 exceeds 65536 UTF-8 bytes")
+    jvmInputArgumentsIdentity(Vector.fill(17)("x" * MaxJvmInputArgumentBytes)) shouldBe
+      Left("JVM input arguments exceed 1048576 total UTF-8 bytes")
+    val unpairedSurrogate = new String(Array(0xd800.toChar))
+    jvmInputArgumentsIdentity(Vector(unpairedSurrogate)) shouldBe
+      Left("JVM input argument at index 0 is not valid Unicode")
   }
 
   test("nearest-rank p50 p95 p99 and max are reproducible from raw samples") {
@@ -116,23 +199,35 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
 
   test("domain-separated evidence digest has an independent golden value") {
     evidenceDigest("{\"a\":1}") shouldBe
-      "24232ba172dd2993218416e023150f2744c7e25a2c240d65fdba89fedf341105"
+      "3ab4418ee6b3e716f02012b936bba5b4ee089ac5b39e9bd3c706730fcfe27eb0"
   }
 
   test("evidence envelope is canonical and binds raw samples and metadata") {
     val payload = samplePayload(Vector(10L, 20L))
     val rendered = renderEnvelope(payload)
-    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v2\"")
+    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v3\"")
     rendered should endWith("}\n")
+    rendered should include("\"campaignBinding\":{\"runId\":\"host-a:run-01\",\"manifestByteLength\":9")
     rendered should include("\"samplesNs\":[10,20]")
     rendered should include("\"p99Ns\":20")
     rendered should include("\"allocatedBytes\":[100,200]")
     rendered should include("\"p99Bytes\":200")
+    rendered should include("\"jvmInputArgumentCount\":2")
     rendered should include("\"garbageCollectorDeltas\":[{\"name\":\"gc\",\"collections\":1,\"collectionTimeMs\":2}]")
 
     val changed = renderEnvelope(samplePayload(Vector(10L, 21L)))
+    val changedManifest = renderEnvelope(payload.copy(
+      campaignBinding = Some(payload.campaignBinding.get.copy(
+        manifestSha256 = "b" * 64))))
+    val changedRun = renderEnvelope(payload.copy(
+      campaignBinding = Some(payload.campaignBinding.get.copy(runId = "host-a:run-02"))))
+    val changedJvmArguments = renderEnvelope(payload.copy(
+      environment = payload.environment.copy(jvmInputArgumentsSha256 = "c" * 64)))
     digestFrom(rendered) shouldBe evidenceDigest(renderPayload(payload))
     digestFrom(rendered) should not be digestFrom(changed)
+    digestFrom(rendered) should not be digestFrom(changedManifest)
+    digestFrom(rendered) should not be digestFrom(changedRun)
+    digestFrom(rendered) should not be digestFrom(changedJvmArguments)
     renderEnvelope(payload) shouldBe rendered
   }
 
@@ -152,6 +247,79 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         garbageCollectorDeltas = Vector(GarbageCollectorDelta("other", 0, 0))))
     }
     gcError.getMessage should include("garbage collector metadata does not match sampled deltas")
+
+    val manifestError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(
+        campaignBinding = Some(payload.campaignBinding.get.copy(
+          manifestSha256 = "A" * 64))))
+    }
+    manifestError.getMessage should include("campaign manifest SHA-256 is invalid")
+
+    val revisionError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(implementationRevision = "unrecorded"))
+    }
+    revisionError.getMessage should include(
+      "campaign-bound evidence has an unrecorded implementation revision")
+
+    val nullRevisionError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(
+        implementationRevision = null,
+        campaignBinding = None))
+    }
+    nullRevisionError.getMessage shouldBe
+      "requirement failed: implementationRevision is null"
+
+    val emptyRevisionError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(
+        implementationRevision = "",
+        campaignBinding = None))
+    }
+    emptyRevisionError.getMessage shouldBe
+      "requirement failed: implementationRevision must not be empty"
+
+    val argumentsError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(
+        environment = payload.environment.copy(jvmInputArgumentCount = -1)))
+    }
+    argumentsError.getMessage should include("JVM input argument count is invalid")
+  }
+
+  test("failed campaign manifest reads use constant errors and create no output") {
+    val directory = Files.createTempDirectory("eip0045-b5-campaign-negative-")
+    val missing = directory.resolve("missing.json")
+    val empty = directory.resolve("empty.json")
+    val oversized = directory.resolve("oversized.json")
+    try {
+      Files.createFile(empty)
+      Files.write(oversized, new Array[Byte](MaxCampaignManifestBytes + 1))
+      failedCampaignMessage(directory, missing, "missing-output.json") shouldBe
+        "campaign manifest is not a regular file"
+      failedCampaignMessage(directory, empty, "empty-output.json") shouldBe
+        "campaign manifest is empty"
+      failedCampaignMessage(directory, oversized, "oversized-output.json") shouldBe
+        "campaign manifest exceeds 1048576 bytes"
+    } finally {
+      Files.deleteIfExists(missing)
+      Files.deleteIfExists(empty)
+      Files.deleteIfExists(oversized)
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  private def failedCampaignMessage(
+      directory: java.nio.file.Path,
+      manifest: java.nio.file.Path,
+      outputName: String): String = {
+    val output = directory.resolve(outputName)
+    val error = intercept[IllegalArgumentException] {
+      Eip0045VerifierBenchmark.main(Array(
+        "--implementation-revision", "commit:00",
+        "--campaign-manifest", manifest.toString,
+        "--campaign-run-id", "host-a:run-01",
+        "--output", output.toString))
+    }
+    Files.exists(output) shouldBe false
+    error.getMessage
   }
 
   private def digestFrom(envelope: String): String = {
@@ -190,6 +358,8 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         "jit",
         Vector("gc"),
         "com.sun.management.ThreadMXBean.getThreadAllocatedBytes(currentThread)",
+        2,
+        "d" * 64,
         "cpu",
         "argument"),
       scenarios = Vector(ScenarioEvidence(
@@ -201,6 +371,10 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         Vector(100L, 200L),
         AllocationStatistics(2, 100, 200, 200, 200))),
       garbageCollectorDeltas = Vector(GarbageCollectorDelta("gc", 1, 2)),
+      campaignBinding = Some(CampaignBinding(
+        "host-a:run-01",
+        9,
+        "7021e610a5f62eefd01830fea68e5fa180e8cf017c08ea0890c326b2854ebc96")),
       limitations = Vector("single host"))
   }
 }

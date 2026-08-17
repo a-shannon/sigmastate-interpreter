@@ -5,7 +5,8 @@
  */
 package sigma.stark.profile.benchmark
 
-import java.nio.charset.StandardCharsets
+import java.nio.CharBuffer
+import java.nio.charset.{CharacterCodingException, CodingErrorAction, StandardCharsets}
 import java.security.MessageDigest
 
 /** Deterministic, dependency-free model and encoder for EIP-0045 B5 JVM
@@ -14,21 +15,30 @@ import java.security.MessageDigest
   * explicitly exercises it.
   */
 private[benchmark] object Eip0045BenchmarkSupport {
-  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v2"
+  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v3"
   final val DigestAlgorithm: String = "SHA-256"
-  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v2"
-  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v2"
+  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v3"
+  final val JvmInputArgumentsDigestDomain: String =
+    "Ergo.EIP0045.B5.JvmInputArguments.v1"
+  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v3"
   final val DefaultWarmupRounds: Int = 15
   final val DefaultSampleRounds: Int = 100
   final val MaxWarmupRounds: Int = 10000
   final val MaxSampleRounds: Int = 10000
+  final val MaxCampaignManifestBytes: Int = 1024 * 1024
+  final val MaxCampaignRunIdCharacters: Int = 128
+  final val MaxJvmInputArguments: Int = 1024
+  final val MaxJvmInputArgumentBytes: Int = 64 * 1024
+  final val MaxJvmInputArgumentsTotalBytes: Int = 1024 * 1024
 
   final case class Config(
       warmupRounds: Int,
       sampleRounds: Int,
       outputPath: Option[String],
       declaredCpuModel: Option[String],
-      implementationRevision: String)
+      implementationRevision: String,
+      campaignManifestPath: Option[String],
+      campaignRunId: Option[String])
 
   final case class ResourceMetadata(
       id: String,
@@ -52,8 +62,19 @@ private[benchmark] object Eip0045BenchmarkSupport {
       jitCompiler: String,
       garbageCollectors: Vector[String],
       threadAllocationMeter: String,
+      jvmInputArgumentCount: Int,
+      jvmInputArgumentsSha256: String,
       cpuModel: String,
       cpuModelSource: String)
+
+  final case class CampaignBinding(
+      runId: String,
+      manifestByteLength: Int,
+      manifestSha256: String)
+
+  final case class JvmInputArgumentsIdentity(
+      argumentCount: Int,
+      argumentsSha256: String)
 
   final case class TimingStatistics(
       sampleCount: Int,
@@ -97,6 +118,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
       resources: Vector[ResourceMetadata],
       warmupRounds: Int,
       sampleRounds: Int,
+      campaignBinding: Option[CampaignBinding],
       environment: EnvironmentMetadata,
       scenarios: Vector[ScenarioEvidence],
       garbageCollectorDeltas: Vector[GarbageCollectorDelta],
@@ -112,6 +134,10 @@ private[benchmark] object Eip0045BenchmarkSupport {
       |  --cpu-model TEXT    Explicit public CPU description for cross-host evidence
       |  --implementation-revision TEXT
       |                      Exact public commit or source-tree digest (default: unrecorded)
+      |  --campaign-manifest FILE
+      |                      Bind exact manifest bytes; requires --campaign-run-id
+      |  --campaign-run-id ID
+      |                      Public manifest run ID; requires --campaign-manifest
       |  --help              Show this help
       |""".stripMargin
 
@@ -123,11 +149,15 @@ private[benchmark] object Eip0045BenchmarkSupport {
     var outputPath: Option[String] = None
     var cpuModel: Option[String] = None
     var implementationRevision = "unrecorded"
+    var campaignManifestPath: Option[String] = None
+    var campaignRunId: Option[String] = None
     var seenWarmup = false
     var seenSamples = false
     var seenOutput = false
     var seenCpu = false
     var seenRevision = false
+    var seenCampaignManifest = false
+    var seenCampaignRunId = false
     var i = 0
     while (i < args.length) {
       val option = args(i)
@@ -188,15 +218,35 @@ private[benchmark] object Eip0045BenchmarkSupport {
             case Right(v) => v
             case Left(e)  => return Left(e)
           }
-          val normalized = value.trim
-          if (normalized.isEmpty)
-            return Left("--implementation-revision must not be empty")
-          if (normalized.length > 256)
-            return Left("--implementation-revision must be at most 256 characters")
-          if (normalized.exists(ch => ch < ' '))
-            return Left("--implementation-revision must not contain control characters")
-          implementationRevision = normalized
+          validateImplementationRevision(value) match {
+            case Right(normalized) => implementationRevision = normalized
+            case Left(detail) => return Left("--implementation-revision " + detail)
+          }
           seenRevision = true
+          i += 2
+        case "--campaign-manifest" =>
+          if (seenCampaignManifest) return Left("duplicate option --campaign-manifest")
+          val value = nextValue(args, i, option) match {
+            case Right(v) => v
+            case Left(e)  => return Left(e)
+          }
+          if (value.trim.isEmpty) return Left("--campaign-manifest must not be empty")
+          campaignManifestPath = Some(value)
+          seenCampaignManifest = true
+          i += 2
+        case "--campaign-run-id" =>
+          if (seenCampaignRunId) return Left("duplicate option --campaign-run-id")
+          val value = nextValue(args, i, option) match {
+            case Right(v) => v
+            case Left(e)  => return Left(e)
+          }
+          val normalized = value.trim
+          if (!isValidCampaignRunId(normalized))
+            return Left(
+              "--campaign-run-id must be 1-" + MaxCampaignRunIdCharacters +
+                " characters using only ASCII letters, digits, '.', '_', ':', or '-'")
+          campaignRunId = Some(normalized)
+          seenCampaignRunId = true
           i += 2
         case "--help" =>
           return Left("--help must be handled before argument parsing")
@@ -204,12 +254,20 @@ private[benchmark] object Eip0045BenchmarkSupport {
           return Left("unknown option " + unknown)
       }
     }
+    if (campaignManifestPath.isDefined != campaignRunId.isDefined)
+      return Left("--campaign-manifest and --campaign-run-id must be supplied together")
+    if (campaignManifestPath.isDefined && implementationRevision == "unrecorded")
+      return Left(
+        "campaign-bound runs require a recorded --implementation-revision")
+
     Right(Config(
       warmupRounds,
       sampleRounds,
       outputPath,
       cpuModel,
-      implementationRevision))
+      implementationRevision,
+      campaignManifestPath,
+      campaignRunId))
   }
 
   private def nextValue(
@@ -251,6 +309,115 @@ private[benchmark] object Eip0045BenchmarkSupport {
     catch {
       case _: NumberFormatException => Left(option + " must be a base-10 32-bit integer")
     }
+  }
+
+  private[benchmark] def isValidCampaignRunId(value: String): Boolean = {
+    if (value == null || value.isEmpty || value.length > MaxCampaignRunIdCharacters)
+      false
+    else value.forall { ch =>
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9') ||
+      ch == '.' || ch == '_' || ch == ':' || ch == '-'
+    }
+  }
+
+  private[benchmark] def validateImplementationRevision(
+      value: String): Either[String, String] = {
+    if (value == null) Left("is null")
+    else if (value.length > 256) Left("must be at most 256 characters")
+    else if (value.exists(ch => Character.isISOControl(ch)))
+      Left("must not contain control characters")
+    else {
+      val normalized = value.trim
+      if (normalized.isEmpty) Left("must not be empty")
+      else Right(normalized)
+    }
+  }
+
+  def campaignBindingFromBytes(
+      runId: String,
+      manifestBytes: Array[Byte]): Either[String, CampaignBinding] = {
+    if (!isValidCampaignRunId(runId))
+      Left("campaign run ID is invalid")
+    else if (manifestBytes == null)
+      Left("campaign manifest bytes are null")
+    else if (manifestBytes.isEmpty)
+      Left("campaign manifest is empty")
+    else if (manifestBytes.length > MaxCampaignManifestBytes)
+      Left("campaign manifest exceeds " + MaxCampaignManifestBytes + " bytes")
+    else Right(CampaignBinding(
+      runId,
+      manifestBytes.length,
+      sha256Hex(manifestBytes)))
+  }
+
+  /** Identity of the exact ordered JVM input-argument strings reported by
+    * RuntimeMXBean. Each strict UTF-8 value is prefixed with its unsigned
+    * 32-bit byte length, and the sequence begins with its element count.
+    * Raw arguments are never retained in the evidence envelope.
+    */
+  def jvmInputArgumentsIdentity(
+      arguments: Seq[String]): Either[String, JvmInputArgumentsIdentity] = {
+    if (arguments == null) return Left("JVM input arguments are null")
+    if (arguments.length > MaxJvmInputArguments)
+      return Left("JVM input argument count exceeds " + MaxJvmInputArguments)
+
+    val digest = MessageDigest.getInstance(DigestAlgorithm)
+    digest.update(JvmInputArgumentsDigestDomain.getBytes(StandardCharsets.US_ASCII))
+    digest.update(0.toByte)
+    updateUint32(digest, arguments.length)
+    var totalBytes = 0L
+    var i = 0
+    while (i < arguments.length) {
+      val argument = arguments(i)
+      if (argument == null)
+        return Left("JVM input argument at index " + i + " is null")
+      if (argument.length > MaxJvmInputArgumentBytes)
+        return Left(
+          "JVM input argument at index " + i + " exceeds " +
+            MaxJvmInputArgumentBytes + " characters before UTF-8 encoding")
+      val encoded = strictUtf8(argument) match {
+        case Right(value) => value
+        case Left(detail) => return Left(
+          "JVM input argument at index " + i + " " + detail)
+      }
+      if (encoded.length > MaxJvmInputArgumentBytes)
+        return Left(
+          "JVM input argument at index " + i + " exceeds " +
+            MaxJvmInputArgumentBytes + " UTF-8 bytes")
+      totalBytes += encoded.length.toLong
+      if (totalBytes > MaxJvmInputArgumentsTotalBytes.toLong)
+        return Left(
+          "JVM input arguments exceed " + MaxJvmInputArgumentsTotalBytes +
+            " total UTF-8 bytes")
+      updateUint32(digest, encoded.length)
+      digest.update(encoded)
+      i += 1
+    }
+    Right(JvmInputArgumentsIdentity(arguments.length, hex(digest.digest())))
+  }
+
+  private def strictUtf8(value: String): Either[String, Array[Byte]] = {
+    val encoder = StandardCharsets.UTF_8.newEncoder()
+      .onMalformedInput(CodingErrorAction.REPORT)
+      .onUnmappableCharacter(CodingErrorAction.REPORT)
+    try {
+      val buffer = encoder.encode(CharBuffer.wrap(value))
+      val out = new Array[Byte](buffer.remaining())
+      buffer.get(out)
+      Right(out)
+    } catch {
+      case _: CharacterCodingException => Left("is not valid Unicode")
+    }
+  }
+
+  private def updateUint32(digest: MessageDigest, value: Int): Unit = {
+    require(value >= 0, "framed value is negative")
+    digest.update(((value >>> 24) & 0xff).toByte)
+    digest.update(((value >>> 16) & 0xff).toByte)
+    digest.update(((value >>> 8) & 0xff).toByte)
+    digest.update((value & 0xff).toByte)
   }
 
   /** Nearest-rank percentiles. Raw samples remain in the evidence so every
@@ -381,10 +548,37 @@ private[benchmark] object Eip0045BenchmarkSupport {
     require(payload.warmupRounds >= 0, "warmupRounds is negative")
     require(payload.sampleRounds > 0, "sampleRounds is not positive")
     require(payload.benchmarkDurationNs >= 0L, "benchmarkDurationNs is negative")
+    require(payload.campaignBinding != null, "campaignBinding option is null")
     require(payload.environment != null, "environment is null")
     require(payload.scenarios != null, "scenarios are null")
     require(payload.garbageCollectorDeltas != null, "garbageCollectorDeltas is null")
     require(payload.scenarios.nonEmpty, "scenarios are empty")
+    validateImplementationRevision(payload.implementationRevision) match {
+      case Left(detail) =>
+        throw new IllegalArgumentException(
+          "requirement failed: implementationRevision " + detail)
+      case Right(normalized) =>
+        require(normalized == payload.implementationRevision,
+          "implementationRevision has leading or trailing whitespace")
+    }
+    payload.campaignBinding.foreach { binding =>
+      require(binding != null, "campaignBinding contains null")
+      require(isValidCampaignRunId(binding.runId), "campaign run ID is invalid")
+      require(
+        binding.manifestByteLength > 0 &&
+          binding.manifestByteLength <= MaxCampaignManifestBytes,
+        "campaign manifest byte length is invalid")
+      require(isLowerHexSha256(binding.manifestSha256),
+        "campaign manifest SHA-256 is invalid")
+      require(payload.implementationRevision != "unrecorded",
+        "campaign-bound evidence has an unrecorded implementation revision")
+    }
+    require(
+      payload.environment.jvmInputArgumentCount >= 0 &&
+        payload.environment.jvmInputArgumentCount <= MaxJvmInputArguments,
+      "JVM input argument count is invalid")
+    require(isLowerHexSha256(payload.environment.jvmInputArgumentsSha256),
+      "JVM input arguments SHA-256 is invalid")
     require(
       payload.scenarios.forall(item => item != null && item.id != null && item.id.nonEmpty),
       "scenarios contain an invalid entry")
@@ -442,6 +636,18 @@ private[benchmark] object Eip0045BenchmarkSupport {
       builder.append(',')
       field(builder, "sha256", resource.sha256)
       builder.append('}')
+    }
+    out.append(',').append(quote("campaignBinding")).append(':')
+    payload.campaignBinding match {
+      case Some(binding) =>
+        out.append('{')
+        field(out, "runId", binding.runId)
+        out.append(',')
+        numberField(out, "manifestByteLength", binding.manifestByteLength.toLong)
+        out.append(',')
+        field(out, "manifestSha256", binding.manifestSha256)
+        out.append('}')
+      case None => out.append("null")
     }
     out.append(',').append(quote("configuration")).append(':').append('{')
     numberField(out, "warmupRounds", payload.warmupRounds.toLong)
@@ -545,6 +751,10 @@ private[benchmark] object Eip0045BenchmarkSupport {
     out.append(',')
     field(out, "threadAllocationMeter", environment.threadAllocationMeter)
     out.append(',')
+    numberField(out, "jvmInputArgumentCount", environment.jvmInputArgumentCount.toLong)
+    out.append(',')
+    field(out, "jvmInputArgumentsSha256", environment.jvmInputArgumentsSha256)
+    out.append(',')
     field(out, "cpuModel", environment.cpuModel)
     out.append(',')
     field(out, "cpuModelSource", environment.cpuModelSource)
@@ -594,6 +804,11 @@ private[benchmark] object Eip0045BenchmarkSupport {
     out.append(quote(name)).append(':').append(value)
 
   private def nullSafe(value: String): String = if (value == null) "" else value
+
+  private def isLowerHexSha256(value: String): Boolean =
+    value != null && value.length == 64 && value.forall { ch =>
+      (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')
+    }
 
   private[benchmark] def quote(value: String): String = {
     val out = new StringBuilder(value.length + 2)

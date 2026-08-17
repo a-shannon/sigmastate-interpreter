@@ -5,7 +5,7 @@
  */
 package sigma.stark.profile.benchmark
 
-import java.io.ByteArrayOutputStream
+import java.io.{ByteArrayOutputStream, IOException}
 import java.lang.management.ManagementFactory
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths, StandardOpenOption}
@@ -93,6 +93,7 @@ object Eip0045VerifierBenchmark {
         throw new IllegalArgumentException(detail)
     }
 
+    val campaignBinding = loadCampaignBinding(config)
     val fixture = loadFixture()
     val scenarios = buildScenarios(fixture)
     val allocationMeter = openThreadAllocationMeter()
@@ -135,6 +136,7 @@ object Eip0045VerifierBenchmark {
       resources = fixture.resources,
       warmupRounds = config.warmupRounds,
       sampleRounds = config.sampleRounds,
+      campaignBinding = campaignBinding,
       environment = environment,
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = measurements.garbageCollectorDeltas,
@@ -146,7 +148,14 @@ object Eip0045VerifierBenchmark {
         "Allocation samples cover only the current benchmark thread; process-wide or native allocations are outside their scope.",
         "Garbage-collector deltas are process-wide observations and cannot be attributed to one scenario.",
         "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
+        "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
         "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.") ++
+        (campaignBinding match {
+          case Some(_) => Vector(
+            "Campaign binding content-binds manifest bytes and a run ID but does not validate manifest semantics, run membership, or campaign policy compliance.")
+          case None => Vector(
+            "No campaign manifest or run ID is bound, so this diagnostic is not acceptable campaign evidence.")
+        }) ++
         (if (config.implementationRevision == "unrecorded")
           Vector("implementationRevision is unrecorded, so this run is not acceptable campaign evidence.")
         else Vector.empty))
@@ -171,6 +180,59 @@ object Eip0045VerifierBenchmark {
     // Force the verification outcomes to remain observable across the whole
     // run even under an aggressively optimizing JVM.
     if (blackhole == Int.MinValue) System.err.println("blackhole=" + blackhole)
+  }
+
+  private def loadCampaignBinding(config: Config): Option[CampaignBinding] =
+    (config.campaignManifestPath, config.campaignRunId) match {
+      case (None, None) => None
+      case (Some(pathText), Some(runId)) =>
+        val bytes = readBoundedCampaignManifest(pathText)
+        campaignBindingFromBytes(runId, bytes) match {
+          case Right(value) => Some(value)
+          case Left(detail) => throw new IllegalArgumentException(detail)
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          "campaign manifest and run ID must be supplied together")
+    }
+
+  private def readBoundedCampaignManifest(pathText: String): Array[Byte] = {
+    val path = try Paths.get(pathText)
+    catch {
+      case _: RuntimeException =>
+        throw new IllegalArgumentException("campaign manifest path is invalid")
+    }
+    try {
+      if (!Files.isRegularFile(path))
+        throw new IllegalArgumentException("campaign manifest is not a regular file")
+
+      val in = Files.newInputStream(path)
+      val out = new ByteArrayOutputStream()
+      val buffer = new Array[Byte](8192)
+      try {
+        var read = in.read(buffer)
+        while (read >= 0) {
+          if (read > 0) {
+            if (out.size().toLong + read.toLong > MaxCampaignManifestBytes.toLong)
+              throw new IllegalArgumentException(
+                "campaign manifest exceeds " + MaxCampaignManifestBytes + " bytes")
+            out.write(buffer, 0, read)
+          }
+          read = in.read(buffer)
+        }
+        val bytes = out.toByteArray
+        if (bytes.isEmpty)
+          throw new IllegalArgumentException("campaign manifest is empty")
+        bytes
+      } finally {
+        in.close()
+        out.close()
+      }
+    } catch {
+      case error: IllegalArgumentException => throw error
+      case _: IOException | _: SecurityException =>
+        throw new IllegalArgumentException("campaign manifest could not be read")
+    }
   }
 
   private def loadFixture(): Fixture = {
@@ -422,6 +484,11 @@ object Eip0045VerifierBenchmark {
       threadAllocationMeter: String): EnvironmentMetadata = {
     val runtimeBean = ManagementFactory.getRuntimeMXBean
     val compilationBean = ManagementFactory.getCompilationMXBean
+    val inputArgumentsIdentity = jvmInputArgumentsIdentity(
+      runtimeBean.getInputArguments.asScala.toVector) match {
+      case Right(value) => value
+      case Left(detail) => throw new IllegalStateException(detail)
+    }
     val (cpuModel, cpuModelSource) = detectCpuModel(config.declaredCpuModel)
     EnvironmentMetadata(
       javaRuntimeName = property("java.runtime.name"),
@@ -440,6 +507,8 @@ object Eip0045VerifierBenchmark {
       garbageCollectors = ManagementFactory.getGarbageCollectorMXBeans.asScala
         .map(_.getName).toVector.sorted,
       threadAllocationMeter = threadAllocationMeter,
+      jvmInputArgumentCount = inputArgumentsIdentity.argumentCount,
+      jvmInputArgumentsSha256 = inputArgumentsIdentity.argumentsSha256,
       cpuModel = cpuModel,
       cpuModelSource = cpuModelSource)
   }
