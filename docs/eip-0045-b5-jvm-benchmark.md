@@ -97,6 +97,82 @@ evidence nor a public campaign manifest should contain the complete raw JVM
 argument strings. The companion validator compares the observed count/digest
 with those expected identities.
 
+## Campaign manifest and archive validation
+
+`Eip0045CampaignValidator` consumes a canonical `CampaignManifestV1` and the
+V3 evidence files named by that campaign. The manifest fixes the candidate
+profile, implementation revision, verifier entry point, seven resource
+identities, four scenarios, warmup and sample rounds, and every V3 format
+constant used by the producer. Revision identities use either
+`commit:` followed by 40 lowercase hexadecimal digits or `tree-sha256:`
+followed by a 64-digit lowercase digest.
+
+The manifest and archive-index V1 canonicalization identifiers say exactly
+what the encoders write: fixed field order, no whitespace between JSON tokens,
+and one terminal LF byte. The LF is part of the file identity.
+
+The matrix is explicit. A public environment policy records the JVM, OS, CPU,
+heap, JIT, collector names and allocation-counter implementation expected for
+one host class. A separate JVM-argument policy records only the ordered
+argument count and domain-separated digest. Cells pair those two policies and
+declare a bounded replicate count; runs assign one public run ID to each
+replicate. Policy IDs, cell IDs, run IDs and replicate slots must be sorted,
+unique and fully referenced.
+
+For example, the first archive pass is:
+
+```text
+sbt -batch "project coreJVM" "Test / runMain sigma.stark.profile.benchmark.Eip0045CampaignValidator --manifest CAMPAIGN_MANIFEST --evidence RUN_1_JSON --evidence RUN_2_JSON --output ARCHIVE_INDEX"
+```
+
+The validator reads only bounded regular files. It requires exactly one V3
+evidence file for every declared run, recomputes the payload digest and sample
+summaries, checks collector metadata, and compares all campaign-bound fields
+with the selected cell. The file command validates one evidence file at a time
+and retains only its fixed-size index entry before opening the next file; it
+does not collect the campaign's evidence bytes in memory. The first invalid
+file stops the scan, so later paths are not opened.
+
+All manifest, evidence and expected-index paths, including their ancestor
+directories, must remain trusted, quiescent, non-shared and controlled by the
+operator for the entire validation. The regular-file and size checks, followed
+by the open, are pathname prechecks; they do not pin an inode or defend against
+concurrent local substitution. Stage every input in a private custody directory
+before running the validator.
+
+Output uses create-new semantics and is written only after every input has
+passed. The writer chooses a bounded random adjacent name and opens it once
+with `CREATE_NEW`; name collisions alone are retried, and a colliding entry is
+never treated as owned or removed. After 16 consecutive collisions, publication
+fails with the final name absent and every colliding entry untouched. The same
+open handle fills the temporary file, flushes it, forces it to storage and
+closes it. The writer then creates the final name atomically as a hard link,
+which fails if that name already exists. A filesystem without hard-link support
+fails closed. An interrupted write leaves the final name absent; retrying is
+safe after the owned temporary file is removed. Cleanup never deletes a final
+link that has already been published. If removal of the redundant temporary
+link fails after publication, the operation still reports success because the
+final file is complete; that temporary name may remain for later housekeeping.
+
+The output parent must be a real directory with no symbolic-link component. It
+is also a precondition that this parent is trusted, non-shared and controlled
+by the operator. Java's standard hard-link API publishes by pathname, so this
+tool does not claim protection against another principal concurrently changing
+directory entries.
+
+The resulting index is deterministic and contains no local paths. Entries are
+sorted by run ID and bind each complete evidence file by byte length and
+SHA-256, alongside its V3 payload digest. Preserve that index as a reviewed
+campaign artifact. A later replay can supply it with `--expected-index`; this
+detects changes even when someone has coordinated new raw samples, summaries,
+collector deltas and a matching V3 payload digest.
+
+Canonical JSON and full-file hashes provide content identity. They do not
+authenticate an operator, prove host isolation, establish that a measurement
+occurred, or decide whether a campaign is sufficient for B5. The public
+manifest should contain policy identities and public machine descriptions,
+never raw JVM arguments, credentials, local paths or private host metadata.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process
