@@ -61,6 +61,25 @@ object Eip0045VerifierBenchmark {
       expectedClaim: Array[Byte],
       resources: Vector[ResourceMetadata])
 
+  private final case class Measurements(
+      timingSamples: Array[Array[Long]],
+      allocationSamples: Array[Array[Long]],
+      garbageCollectorDeltas: Vector[GarbageCollectorDelta])
+
+  private final class ThreadAllocationMeter(
+      bean: com.sun.management.ThreadMXBean,
+      threadId: Long) {
+    val description: String =
+      "com.sun.management.ThreadMXBean.getThreadAllocatedBytes(currentThread)"
+
+    def read(): Long = {
+      val value = bean.getThreadAllocatedBytes(threadId)
+      if (value < 0L)
+        throw new IllegalStateException("thread allocation counter became unavailable")
+      value
+    }
+  }
+
   def main(args: Array[String]): Unit = {
     if (args != null && args.contains("--help")) {
       System.out.print(Usage)
@@ -76,18 +95,24 @@ object Eip0045VerifierBenchmark {
 
     val fixture = loadFixture()
     val scenarios = buildScenarios(fixture)
-    val environment = environmentMetadata(config)
+    val allocationMeter = openThreadAllocationMeter()
+    val environment = environmentMetadata(config, allocationMeter.description)
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
     val validationQueries = scenarios.map(validateScenario)
     warmUp(scenarios, config.warmupRounds)
-    val samples = measure(scenarios, config.sampleRounds)
+    val measurements = measure(scenarios, config.sampleRounds, allocationMeter)
 
     val duration = System.nanoTime() - runStarted
     val scenarioEvidence = scenarios.indices.map { i =>
-      val sampleVector = samples(i).toVector
+      val sampleVector = measurements.timingSamples(i).toVector
       val summary = statistics(sampleVector) match {
+        case Right(value) => value
+        case Left(detail) => throw new IllegalStateException(detail)
+      }
+      val allocationVector = measurements.allocationSamples(i).toVector
+      val allocationSummary = allocationStatistics(allocationVector) match {
         case Right(value) => value
         case Left(detail) => throw new IllegalStateException(detail)
       }
@@ -96,7 +121,9 @@ object Eip0045VerifierBenchmark {
         scenarios(i).expectedOutcome,
         validationQueries(i),
         sampleVector,
-        summary)
+        summary,
+        allocationVector,
+        allocationSummary)
     }.toVector
 
     val payload = EvidencePayload(
@@ -110,12 +137,15 @@ object Eip0045VerifierBenchmark {
       sampleRounds = config.sampleRounds,
       environment = environment,
       scenarios = scenarioEvidence,
+      garbageCollectorDeltas = measurements.garbageCollectorDeltas,
       limitations = Vector(
         "This run measures one JVM process on one host and cannot close B5 by itself.",
         "The evidence digest binds content but is not an operator signature or execution attestation.",
         "The harness does not choose, infer, or recommend a consensus fixedJit value.",
-        "Profile loading, ErgoTree preflight, transaction parsing, and node admission are outside the timed scope.",
-        "Peak live memory, allocation volume or rate, and the GC pause/resource envelope are not measured and remain a separate B5 obligation.",
+        "Profile loading, ErgoTree preflight, transaction parsing, and node admission are outside the timed and allocation scope.",
+        "Allocation samples cover only the current benchmark thread; process-wide or native allocations are outside their scope.",
+        "Garbage-collector deltas are process-wide observations and cannot be attributed to one scenario.",
+        "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
         "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.") ++
         (if (config.implementationRevision == "unrecorded")
           Vector("implementationRevision is unrecorded, so this run is not acceptable campaign evidence.")
@@ -253,21 +283,39 @@ object Eip0045VerifierBenchmark {
     }
   }
 
-  private def measure(scenarios: Vector[Scenario], rounds: Int): Array[Array[Long]] = {
-    val samples = Array.fill(scenarios.length)(new Array[Long](rounds))
+  private def measure(
+      scenarios: Vector[Scenario],
+      rounds: Int,
+      allocationMeter: ThreadAllocationMeter): Measurements = {
+    val timingSamples = Array.fill(scenarios.length)(new Array[Long](rounds))
+    val allocationSamples = Array.fill(scenarios.length)(new Array[Long](rounds))
+    val gcBefore = garbageCollectorSnapshot()
     var round = 0
     while (round < rounds) {
       runRotated(scenarios, round) { scenario =>
+        val allocatedBefore = allocationMeter.read()
         val started = System.nanoTime()
         val outcome = scenario.run()
         val elapsed = System.nanoTime() - started
+        val allocatedAfter = allocationMeter.read()
         checkOutcome(scenario, outcome)
         val scenarioIndex = scenarios.indexWhere(_.id == scenario.id)
-        samples(scenarioIndex)(round) = elapsed
+        timingSamples(scenarioIndex)(round) = elapsed
+        allocationSamples(scenarioIndex)(round) = allocatedBytesDelta(
+          allocatedBefore,
+          allocatedAfter) match {
+          case Right(value) => value
+          case Left(detail) => throw new IllegalStateException(detail)
+        }
       }
       round += 1
     }
-    samples
+    val gcAfter = garbageCollectorSnapshot()
+    val gcDelta = garbageCollectorDeltas(gcBefore, gcAfter) match {
+      case Right(value) => value
+      case Left(detail) => throw new IllegalStateException(detail)
+    }
+    Measurements(timingSamples, allocationSamples, gcDelta)
   }
 
   private def runRotated(
@@ -334,7 +382,44 @@ object Eip0045VerifierBenchmark {
     value.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
   }
 
-  private def environmentMetadata(config: Config): EnvironmentMetadata = {
+  private def openThreadAllocationMeter(): ThreadAllocationMeter = {
+    val platformBean = ManagementFactory.getThreadMXBean
+    val bean = platformBean match {
+      case value: com.sun.management.ThreadMXBean => value
+      case _ =>
+        throw new IllegalStateException(
+          "current JVM does not expose com.sun.management.ThreadMXBean")
+    }
+    if (!bean.isThreadAllocatedMemorySupported)
+      throw new IllegalStateException("current JVM does not support thread allocation counters")
+    if (!bean.isThreadAllocatedMemoryEnabled) {
+      try bean.setThreadAllocatedMemoryEnabled(true)
+      catch {
+        case error: SecurityException =>
+          throw new IllegalStateException(
+            "thread allocation counters are disabled and cannot be enabled",
+            error)
+      }
+    }
+    if (!bean.isThreadAllocatedMemoryEnabled)
+      throw new IllegalStateException("thread allocation counters remain disabled")
+    val meter = new ThreadAllocationMeter(bean, Thread.currentThread().getId)
+    meter.read()
+    meter
+  }
+
+  private def garbageCollectorSnapshot(): Vector[GarbageCollectorSnapshot] =
+    ManagementFactory.getGarbageCollectorMXBeans.asScala
+      .map(bean => GarbageCollectorSnapshot(
+        bean.getName,
+        bean.getCollectionCount,
+        bean.getCollectionTime))
+      .toVector
+      .sortBy(_.name)
+
+  private def environmentMetadata(
+      config: Config,
+      threadAllocationMeter: String): EnvironmentMetadata = {
     val runtimeBean = ManagementFactory.getRuntimeMXBean
     val compilationBean = ManagementFactory.getCompilationMXBean
     val (cpuModel, cpuModelSource) = detectCpuModel(config.declaredCpuModel)
@@ -353,7 +438,8 @@ object Eip0045VerifierBenchmark {
       maxHeapBytes = Runtime.getRuntime.maxMemory(),
       jitCompiler = if (compilationBean == null) "unavailable" else compilationBean.getName,
       garbageCollectors = ManagementFactory.getGarbageCollectorMXBeans.asScala
-        .map(_.getName).toVector,
+        .map(_.getName).toVector.sorted,
+      threadAllocationMeter = threadAllocationMeter,
       cpuModel = cpuModel,
       cpuModelSource = cpuModelSource)
   }

@@ -1,4 +1,4 @@
-# EIP-0045 JVM verifier benchmark evidence
+# EIP-0045 JVM verifier timing and resource evidence
 
 `Eip0045VerifierBenchmark` is an opt-in evidence tool for calibrating the
 fixed consensus charge of the stock-profile verifier. It is a JVM test-source
@@ -17,7 +17,10 @@ Each path is validated before timing. Warmup and sampling use a deterministic
 rotating round-robin order so no path permanently occupies one position. One
 sample is one complete `Risc0RawSealVerifier.verify` call. Profile loading,
 fixture construction, JSON serialization, and summary calculation are outside
-the timed samples.
+the timed samples. Version 2 also records the current benchmark thread's
+allocated-byte delta around each invocation and process-wide garbage-collector
+count/time deltas across the complete sampling phase. It refuses to emit V2
+evidence when either JVM counter is unavailable or moves backwards.
 
 ## Recommended invocation
 
@@ -25,7 +28,7 @@ Use a fresh forked JVM, an otherwise idle host, and the final release JDK and
 node JVM settings intended for the reference measurement. For example:
 
 ```text
-sbt -batch "set coreJVM / Test / fork := true" "coreJVM / Test / runMain sigma.stark.profile.benchmark.Eip0045VerifierBenchmark --warmup-rounds 15 --sample-rounds 100 --implementation-revision REVISION_OR_TREE_DIGEST --cpu-model CPU_MODEL --output target/eip0045-b5-evidence.json"
+sbt -batch "project coreJVM" "set Test / fork := true" "Test / runMain sigma.stark.profile.benchmark.Eip0045VerifierBenchmark --warmup-rounds 15 --sample-rounds 100 --implementation-revision REVISION_OR_TREE_DIGEST --cpu-model CPU_MODEL --output target/eip0045-b5-evidence.json"
 ```
 
 The output path must not already exist. Omitting `--output` emits the JSON to
@@ -46,12 +49,15 @@ The output is canonical, single-line UTF-8 JSON containing:
 - the profile ID, implementation revision, and timed verifier entry point;
 - JVM, operating-system, CPU, core-count, heap, JIT, and GC metadata;
 - every raw nanosecond sample plus nearest-rank p50, p95, p99, and maximum;
+- every current-thread allocated-byte sample plus the same percentile summary;
+- process-wide collection-count and collection-time deltas for every reported
+  garbage collector during the sampling phase;
 - the benchmark method and explicit scope limitations.
 
-`evidenceDigest` is:
+The V2 `evidenceDigest` is:
 
 ```text
-SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v1") || 0x00 || UTF8(payload))
+SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v2") || 0x00 || UTF8(payload))
 ```
 
 Here `payload` is the exact compact JSON object stored in the top-level
@@ -66,20 +72,22 @@ actually occurred.
 A successful run is digest-bound evidence for one verifier build, JVM process,
 and host under the recorded conditions. It can expose the gap between an early
 transport rejection and the valid/late-rejection floor, and it can contribute
-to cost calibration.
+to cost calibration. Its allocation samples quantify Java-heap allocation
+charged to the benchmark thread for each path, while its GC deltas show whether
+the complete sampling phase coincided with collector work.
 
 It does not close B5 by itself, choose a `fixedJit`, measure node admission or
 ErgoTree preflight, control host scheduling or thermals, or replace the
 multi-host/repeated-operator campaign required before activation.
 
-It also does not measure peak live memory, allocation volume or allocation
-rate, or the GC pause/resource envelope. Those remain separate B5 obligations;
-recording the JVM's maximum heap and collector names is environment metadata,
-not memory-safety or allocation evidence.
+It does not measure native or other-thread allocations, peak live memory, a
+scenario-specific GC pause, or the complete GC/resource envelope. Those remain
+separate B5 obligations. The current-thread counter and process-wide GC deltas
+are observations, not memory-safety or concurrency bounds.
 
 ## Retained local diagnostic
 
-The repository retains one explicitly non-closing local run in
+The repository retains one explicitly non-closing V1 timing-only local run in
 `eip-0045-b5-local-diagnostic-v1.json`. It used the source-map identity
 `15049a63cbf7c7fa43e1dc66a669b98a57988cc22c0cc0d6f53b0983a98ff64b`,
 Microsoft OpenJDK 17.0.18, one 16-logical-processor Intel host, 15 rotating
