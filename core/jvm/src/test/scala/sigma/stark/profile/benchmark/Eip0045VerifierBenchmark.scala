@@ -8,13 +8,14 @@ package sigma.stark.profile.benchmark
 import java.io.{ByteArrayOutputStream, IOException}
 import java.lang.management.ManagementFactory
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Paths, StandardOpenOption}
+import java.nio.file.{FileAlreadyExistsException, Files, Paths, StandardOpenOption}
 import java.time.Instant
 
 import sigma.stark.FriVerifier
 import sigma.stark.profile.{RawSealV1Decoder, Risc0ProfilePackageLoader, Risc0RawSealVerifier}
 import sigma.stark.profile.Risc0RawSealVerifier.{Failure, Probe, Verified}
 import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
+import sigma.stark.profile.benchmark.Eip0045CampaignContract._
 
 import scala.collection.JavaConverters._
 import scala.io.Source
@@ -41,6 +42,16 @@ object Eip0045VerifierBenchmark {
   private val ChunkLengths = Array(65535, 65535, 65535, 26063)
 
   @volatile private var blackhole: Int = 0
+
+  private[benchmark] trait ExecutionObserver {
+    def beforeVerifierSetup(): Unit
+    def beforeOutput(): Unit
+  }
+
+  private object NoExecutionObserver extends ExecutionObserver {
+    override def beforeVerifierSetup(): Unit = ()
+    override def beforeOutput(): Unit = ()
+  }
 
   private final class QueryProbe extends Probe {
     var queries: Int = 0
@@ -80,7 +91,15 @@ object Eip0045VerifierBenchmark {
     }
   }
 
-  def main(args: Array[String]): Unit = {
+  def main(args: Array[String]): Unit = run(args, NoExecutionObserver)
+
+  private[benchmark] def runWithObserverForTest(
+      args: Array[String],
+      observer: ExecutionObserver): Unit = run(args, observer)
+
+  private def run(args: Array[String], observer: ExecutionObserver): Unit = {
+    if (observer == null)
+      throw new IllegalArgumentException("benchmark execution observer is null")
     if (args != null && args.contains("--help")) {
       System.out.print(Usage)
       return
@@ -93,11 +112,14 @@ object Eip0045VerifierBenchmark {
         throw new IllegalArgumentException(detail)
     }
 
-    val campaignBinding = loadCampaignBinding(config)
-    val fixture = loadFixture()
-    val scenarios = buildScenarios(fixture)
     val allocationMeter = openThreadAllocationMeter()
     val environment = environmentMetadata(config, allocationMeter.description)
+    val campaignBinding = loadCampaignBinding(config, environment)
+
+    // Campaign policy is fully resolved before profile resources are loaded or
+    // any verifier object can be constructed or invoked.
+    val fixture = loadFixture(observer)
+    val scenarios = buildScenarios(fixture)
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
@@ -140,40 +162,20 @@ object Eip0045VerifierBenchmark {
       environment = environment,
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = measurements.garbageCollectorDeltas,
-      limitations = Vector(
-        "This run measures one JVM process on one host and cannot close B5 by itself.",
-        "The evidence digest binds content but is not an operator signature or execution attestation.",
-        "The harness does not choose, infer, or recommend a consensus fixedJit value.",
-        "Profile loading, ErgoTree preflight, transaction parsing, and node admission are outside the timed and allocation scope.",
-        "Allocation samples cover only the current benchmark thread; process-wide or native allocations are outside their scope.",
-        "Garbage-collector deltas are process-wide observations and cannot be attributed to one scenario.",
-        "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
-        "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
-        "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.") ++
-        (campaignBinding match {
-          case Some(_) => Vector(
-            "Campaign binding content-binds manifest bytes and a run ID but does not validate manifest semantics, run membership, or campaign policy compliance.")
-          case None => Vector(
-            "No campaign manifest or run ID is bound, so this diagnostic is not acceptable campaign evidence.")
-        }) ++
+      limitations = (campaignBinding match {
+        case Some(_) => ExpectedCampaignLimitations
+        case None => ExpectedCampaignLimitations.dropRight(1) :+
+          "No campaign manifest or run ID is bound, so this diagnostic is not acceptable campaign evidence."
+      }) ++
         (if (config.implementationRevision == "unrecorded")
           Vector("implementationRevision is unrecorded, so this run is not acceptable campaign evidence.")
         else Vector.empty))
     val json = renderEnvelope(payload)
 
     config.outputPath match {
-      case Some(pathText) =>
-        val path = Paths.get(pathText)
-        val parent = path.toAbsolutePath.normalize().getParent
-        if (parent != null && !Files.isDirectory(parent))
-          throw new IllegalArgumentException("output parent directory does not exist: " + parent)
-        Files.write(
-          path,
-          json.getBytes(StandardCharsets.UTF_8),
-          StandardOpenOption.CREATE_NEW,
-          StandardOpenOption.WRITE)
-        System.err.println("wrote EIP-0045 benchmark evidence to " + path.toAbsolutePath.normalize())
+      case Some(pathText) => writeEvidenceOutput(pathText, json, observer)
       case None =>
+        observer.beforeOutput()
         System.out.print(json)
     }
 
@@ -182,13 +184,21 @@ object Eip0045VerifierBenchmark {
     if (blackhole == Int.MinValue) System.err.println("blackhole=" + blackhole)
   }
 
-  private def loadCampaignBinding(config: Config): Option[CampaignBinding] =
+  private def loadCampaignBinding(
+      config: Config,
+      environment: EnvironmentMetadata): Option[CampaignBinding] =
     (config.campaignManifestPath, config.campaignRunId) match {
       case (None, None) => None
       case (Some(pathText), Some(runId)) =>
         val bytes = readBoundedCampaignManifest(pathText)
-        campaignBindingFromBytes(runId, bytes) match {
-          case Right(value) => Some(value)
+        resolveRunPolicy(
+          bytes,
+          runId,
+          config.implementationRevision,
+          config.warmupRounds,
+          config.sampleRounds,
+          environment) match {
+          case Right(policy) => Some(policy.campaignBinding)
           case Left(detail) => throw new IllegalArgumentException(detail)
         }
       case _ =>
@@ -235,7 +245,38 @@ object Eip0045VerifierBenchmark {
     }
   }
 
-  private def loadFixture(): Fixture = {
+  private def writeEvidenceOutput(
+      pathText: String,
+      json: String,
+      observer: ExecutionObserver): Unit = {
+    val path = try Paths.get(pathText)
+    catch {
+      case _: RuntimeException =>
+        throw new IllegalArgumentException("benchmark output path is invalid")
+    }
+    try {
+      val parent = path.toAbsolutePath.normalize().getParent
+      if (parent != null && !Files.isDirectory(parent))
+        throw new IllegalArgumentException(
+          "benchmark output parent directory does not exist")
+      observer.beforeOutput()
+      Files.write(
+        path,
+        json.getBytes(StandardCharsets.UTF_8),
+        StandardOpenOption.CREATE_NEW,
+        StandardOpenOption.WRITE)
+    } catch {
+      case error: IllegalArgumentException => throw error
+      case _: FileAlreadyExistsException =>
+        throw new IllegalArgumentException("benchmark output already exists")
+      case _: IOException | _: SecurityException =>
+        throw new IllegalArgumentException("benchmark output could not be created")
+    }
+    System.err.println("wrote EIP-0045 benchmark evidence")
+  }
+
+  private def loadFixture(observer: ExecutionObserver): Fixture = {
+    observer.beforeVerifierSetup()
     val algorithm = resourceBytes(PackageRoot + "algorithm.txt")
     val constants = resourceBytes(PackageRoot + "constants.bin")
     val manifest = resourceBytes(PackageRoot + "manifest.bin")

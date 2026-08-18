@@ -56,9 +56,11 @@ object Eip0045CampaignValidator {
   }
 
   private final case class ManifestContext(
-      manifest: CampaignManifestV1,
-      byteLength: Int,
-      sha256: String)
+      exact: ExactCampaignManifest) {
+    def manifest: CampaignManifestV1 = exact.manifest
+    def byteLength: Int = exact.byteLength
+    def sha256: String = exact.sha256
+  }
 
   private final case class DecodedEvidence(
       runId: String,
@@ -256,13 +258,13 @@ object Eip0045CampaignValidator {
   private def prepareManifest(
       manifestBytes: Array[Byte],
       evidenceCount: Int): Either[String, ManifestContext] = {
-    val manifest = parseManifest(manifestBytes) match {
+    val exact = parseExactCampaignManifest(manifestBytes) match {
       case Right(value) => value
       case Left(detail) => return Left(detail)
     }
-    if (evidenceCount != manifest.runs.length)
+    if (evidenceCount != exact.manifest.runs.length)
       return Left("evidence file count does not match declared runs")
-    Right(ManifestContext(manifest, manifestBytes.length, sha256Hex(manifestBytes)))
+    Right(ManifestContext(exact))
   }
 
   private def validateEvidenceEntry(
@@ -531,15 +533,10 @@ object Eip0045CampaignValidator {
     val manifest = context.manifest
     if (payload.profileId != manifest.profileId)
       return Left("evidence profile ID does not match the campaign")
-    if (payload.implementationRevision != manifest.implementationRevision)
-      return Left("evidence implementation revision does not match the campaign")
     if (payload.verifierEntryPoint != manifest.verifierEntryPoint)
       return Left("evidence verifier entry point does not match the campaign")
     if (payload.resources != manifest.resources)
       return Left("evidence resources do not match the campaign")
-    if (payload.warmupRounds != manifest.warmupRounds ||
-        payload.sampleRounds != manifest.sampleRounds)
-      return Left("evidence rounds do not match the campaign")
     val scenarioPolicies = payload.scenarios.map { scenario =>
       ScenarioPolicy(
         scenario.id,
@@ -560,46 +557,17 @@ object Eip0045CampaignValidator {
       case Some(value) => value
       case None => return Left("evidence campaign binding is missing")
     }
-    if (binding.manifestByteLength != context.byteLength ||
-        binding.manifestSha256 != context.sha256)
-      return Left("evidence manifest binding does not match the exact campaign bytes")
-    val run = manifest.runs.find(_.id == binding.runId) match {
-      case Some(value) => value
-      case None => return Left("evidence run ID is not declared by the campaign")
+    resolveRunPolicy(
+      context.exact,
+      binding,
+      payload.implementationRevision,
+      payload.warmupRounds,
+      payload.sampleRounds,
+      payload.environment) match {
+      case Left(detail) => Left(detail)
+      case Right(policy) => Right(policy.run.id)
     }
-    val cell = manifest.cells.find(_.id == run.cellId).get
-    val environmentPolicy = manifest.environmentPolicies
-      .find(_.id == cell.environmentPolicyId).get
-    val argumentPolicy = manifest.jvmArgumentPolicies
-      .find(_.id == cell.jvmArgumentPolicyId).get
-    if (!environmentMatches(payload.environment, environmentPolicy))
-      return Left("evidence environment does not match the declared cell policy")
-    if (payload.environment.jvmInputArgumentCount != argumentPolicy.argumentCount ||
-        payload.environment.jvmInputArgumentsSha256 != argumentPolicy.argumentsSha256)
-      return Left("evidence JVM argument identity does not match the declared cell policy")
-    Right(run.id)
   }
-
-  private def environmentMatches(
-      actual: EnvironmentMetadata,
-      expected: EnvironmentPolicy): Boolean =
-    actual.javaRuntimeName == expected.javaRuntimeName &&
-      actual.javaRuntimeVersion == expected.javaRuntimeVersion &&
-      actual.javaVmName == expected.javaVmName &&
-      actual.javaVmVendor == expected.javaVmVendor &&
-      actual.javaVmVersion == expected.javaVmVersion &&
-      actual.javaVmInfo == expected.javaVmInfo &&
-      actual.scalaVersion == expected.scalaVersion &&
-      actual.osName == expected.osName &&
-      actual.osVersion == expected.osVersion &&
-      actual.osArch == expected.osArch &&
-      actual.availableProcessors == expected.availableProcessors &&
-      actual.maxHeapBytes == expected.maxHeapBytes &&
-      actual.jitCompiler == expected.jitCompiler &&
-      actual.garbageCollectors == expected.garbageCollectors &&
-      actual.threadAllocationMeter == expected.threadAllocationMeter &&
-      actual.cpuModel == expected.cpuModel &&
-      actual.cpuModelSource == expected.cpuModelSource
 
   private def requireLongArray(value: JsonValue, label: String): Vector[Long] =
     requireArray(value, label).map(item => requireLong(item, label + " item"))

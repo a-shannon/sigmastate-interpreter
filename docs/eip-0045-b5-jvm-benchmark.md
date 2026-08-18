@@ -22,10 +22,13 @@ allocated-byte delta around each invocation and process-wide garbage-collector
 count/time deltas across the complete sampling phase. It refuses to emit V3
 evidence when either JVM counter is unavailable or moves backwards.
 
-V3 can also bind a run to exact campaign-manifest bytes and a public run ID.
-It hashes the ordered JVM input-argument strings reported by `RuntimeMXBean`
-with explicit count and byte-length framing. The envelope retains only that
-digest and argument count, not the raw arguments or the local manifest path.
+V3 can also run under a declared campaign policy. The producer takes one
+defensive copy of the manifest bytes, parses that copy and computes its length
+and SHA-256. It then resolves run to cell to environment/JVM policy. Revision,
+warmup rounds, sample rounds, the 17 environment fields and the JVM argument
+count/digest must all match before the profile fixture is loaded or the
+verifier is called. The envelope retains the manifest identity and public run
+ID, never the local manifest path or raw JVM arguments.
 
 ## Recommended invocation
 
@@ -47,12 +50,13 @@ revision with the exact public commit or a reviewed source-tree digest; this
 field is intentionally declarative because the harness does not shell out to
 Git or depend on a particular checkout layout.
 
-The harness content-binds the manifest bytes and run ID but does not parse the
-manifest or prove that the run ID belongs to it. A companion campaign validator
-must check its schema, run membership, expected JVM-argument digest and matrix
-policy. Omitting both campaign options remains useful for local diagnostics,
-but the output says it is not acceptable campaign evidence. Supplying only one
-option, or using `unrecorded` in campaign mode, fails before output.
+Campaign mode is fail-closed. The harness parses the canonical manifest,
+requires the run ID to be declared, selects that run's cell and checks the
+observed process against its policy before verifier setup. There is no fallback
+from a rejected campaign run to diagnostic mode. Omitting both campaign options
+still runs a local diagnostic, and the output labels it as non-campaign evidence.
+Supplying only one option, or using `unrecorded` in campaign mode, fails before
+output.
 
 ## Evidence format and integrity
 
@@ -97,6 +101,13 @@ evidence nor a public campaign manifest should contain the complete raw JVM
 argument strings. The companion validator compares the observed count/digest
 with those expected identities.
 
+This digest is a stable fingerprint, not an anonymizer. Reusing the same JVM
+argument vector produces the same value and can link records across runs or
+archives. It can also support guessing when the plausible argument set is
+small. Do not treat the digest as confidential, anonymous or proof that the
+arguments were safe; its only job here is exact policy matching without
+publishing the raw vector.
+
 ## Campaign manifest and archive validation
 
 `Eip0045CampaignValidator` consumes a canonical `CampaignManifestV1` and the
@@ -117,7 +128,9 @@ one host class. A separate JVM-argument policy records only the ordered
 argument count and domain-separated digest. Cells pair those two policies and
 declare a bounded replicate count; runs assign one public run ID to each
 replicate. Policy IDs, cell IDs, run IDs and replicate slots must be sorted,
-unique and fully referenced.
+unique and fully referenced. Environment policy values, JVM count/digest
+identities and cell policy pairs must also be unique, so a run cannot resolve
+through two labels for the same policy.
 
 For example, the first archive pass is:
 
@@ -128,10 +141,12 @@ sbt -batch "project coreJVM" "Test / runMain sigma.stark.profile.benchmark.Eip00
 The validator reads only bounded regular files. It requires exactly one V3
 evidence file for every declared run, recomputes the payload digest and sample
 summaries, checks collector metadata, and compares all campaign-bound fields
-with the selected cell. The file command validates one evidence file at a time
-and retains only its fixed-size index entry before opening the next file; it
-does not collect the campaign's evidence bytes in memory. The first invalid
-file stops the scan, so later paths are not opened.
+with the selected cell. Producer and validator call the same pure run-policy
+resolver; the validator reuses the exact parsed-manifest identity when it checks
+each claimed length and SHA-256. The file command validates one evidence file
+at a time and retains only its fixed-size index entry before opening the next
+file; it does not collect the campaign's evidence bytes in memory. The first
+invalid file stops the scan, so later paths are not opened.
 
 All manifest, evidence and expected-index paths, including their ancestor
 directories, must remain trusted, quiescent, non-shared and controlled by the
@@ -177,9 +192,10 @@ never raw JVM arguments, credentials, local paths or private host metadata.
 
 A successful run is digest-bound evidence for one verifier build, JVM process
 and host under the recorded conditions. In campaign mode it also identifies
-the exact manifest bytes, run ID and ordered JVM-input-argument digest observed
-for that process. It can expose the gap between an early transport rejection
-and the valid/late-rejection floor, and it can contribute to cost calibration.
+the exact canonical manifest bytes, one declared run and the selected
+environment/JVM policy observed for that process. It can expose the gap between
+an early transport rejection and the valid/late-rejection floor, and it can
+contribute to cost calibration.
 Its allocation samples are JVM-reported approximations of Java-heap allocation
 charged to the benchmark thread for each path, while its GC deltas show whether
 the complete sampling phase coincided with collector work.
@@ -188,9 +204,10 @@ It does not close B5 by itself, choose a `fixedJit`, measure node admission or
 ErgoTree preflight, control host scheduling or thermals, or replace the
 multi-host/repeated-operator campaign required before activation.
 
-Manifest hashing does not validate manifest semantics, attest the operator or
-prove that the observed JVM arguments satisfy campaign policy. Those checks
-remain obligations of the companion validator and reviewed evidence archive.
+Run-policy resolution does not attest the operator, prove host isolation or
+show that a particular JVM invocation occurred. The archive validator checks
+the resulting files; it does not turn their content bindings into execution
+attestation.
 
 It does not measure native or other-thread allocations, peak live memory, a
 scenario-specific GC pause, or the complete GC/resource envelope. Those remain

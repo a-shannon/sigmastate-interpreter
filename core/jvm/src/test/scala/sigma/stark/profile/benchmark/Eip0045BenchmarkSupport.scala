@@ -135,7 +135,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
       |  --implementation-revision TEXT
       |                      Exact public commit or source-tree digest (default: unrecorded)
       |  --campaign-manifest FILE
-      |                      Bind exact manifest bytes; requires --campaign-run-id
+      |                      Enforce an exact manifest run policy; requires --campaign-run-id
       |  --campaign-run-id ID
       |                      Public manifest run ID; requires --campaign-manifest
       |  --help              Show this help
@@ -250,8 +250,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
           i += 2
         case "--help" =>
           return Left("--help must be handled before argument parsing")
-        case unknown =>
-          return Left("unknown option " + unknown)
+        case _ =>
+          return Left("unknown option at argument index " + i)
       }
     }
     if (campaignManifestPath.isDefined != campaignRunId.isDefined)

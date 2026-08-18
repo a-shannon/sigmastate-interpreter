@@ -78,7 +78,15 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       "--campaign-run-id", "run-01",
       "--campaign-run-id", "run-02")) shouldBe
       Left("duplicate option --campaign-run-id")
-    parseArgs(Array("--unknown")) shouldBe Left("unknown option --unknown")
+    parseArgs(Array("--unknown")) shouldBe Left("unknown option at argument index 0")
+  }
+
+  test("unknown benchmark options never echo secret-shaped or path-shaped tokens") {
+    val secretShaped = "--unknown=C:\\private\\credential-token-marker"
+    val result = parseArgs(Array(secretShaped))
+    result shouldBe Left("unknown option at argument index 0")
+    result.toString should not include secretShaped
+    result.toString should not include "credential-token-marker"
   }
 
   test("campaign binding hashes exact bounded bytes without retaining a path") {
@@ -304,6 +312,23 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       Files.deleteIfExists(oversized)
       Files.deleteIfExists(directory)
     }
+  }
+
+  test("benchmark output failures use path-free diagnostics") {
+    val directory = Files.createTempDirectory("eip0045-b5-output-diagnostic-")
+    val missingParent = directory.resolve("private-credential-marker").resolve("evidence.json")
+    try {
+      val error = intercept[IllegalArgumentException] {
+        Eip0045VerifierBenchmark.main(Array(
+          "--warmup-rounds", "0",
+          "--sample-rounds", "1",
+          "--output", missingParent.toString))
+      }
+      error.getMessage shouldBe "benchmark output parent directory does not exist"
+      error.toString should not include missingParent.toString
+      error.toString should not include "private-credential-marker"
+      Files.exists(missingParent) shouldBe false
+    } finally Files.deleteIfExists(directory)
   }
 
   private def failedCampaignMessage(

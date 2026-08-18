@@ -144,6 +144,35 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       Left("campaign run references an unknown cell")
   }
 
+  test("manifest policy identities and cell joins are unambiguous") {
+    val fixture = campaignFixture()
+    val firstEnvironment = fixture.manifest.environmentPolicies.head
+    val duplicateEnvironmentValue = fixture.manifest.copy(
+      environmentPolicies = fixture.manifest.environmentPolicies.updated(
+        1,
+        firstEnvironment.copy(id = fixture.manifest.environmentPolicies(1).id)))
+    renderManifest(duplicateEnvironmentValue) shouldBe
+      Left("campaign environment policies contain duplicate values")
+
+    val firstArguments = fixture.manifest.jvmArgumentPolicies.head
+    val duplicateJvmIdentity = fixture.manifest.copy(
+      jvmArgumentPolicies = fixture.manifest.jvmArgumentPolicies.updated(
+        1,
+        firstArguments.copy(id = fixture.manifest.jvmArgumentPolicies(1).id)))
+    renderManifest(duplicateJvmIdentity) shouldBe
+      Left("campaign JVM argument policies contain duplicate values")
+
+    val firstCell = fixture.manifest.cells.head
+    val duplicateCellJoin = fixture.manifest.copy(
+      cells = fixture.manifest.cells.updated(
+        1,
+        firstCell.copy(
+          id = fixture.manifest.cells(1).id,
+          replicateCount = fixture.manifest.cells(1).replicateCount)))
+    renderManifest(duplicateCellJoin) shouldBe
+      Left("campaign cells contain duplicate policy pairs")
+  }
+
   test("exactly one evidence file must cover every declared run") {
     val fixture = campaignFixture()
     validateArchiveBytes(fixture.manifestBytes, fixture.evidence.dropRight(1)) shouldBe
@@ -203,11 +232,11 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         first.resources.head.copy(byteLength = first.resources.head.byteLength + 1))) ->
         "evidence resources do not match the campaign",
       first.copy(warmupRounds = first.warmupRounds + 1) ->
-        "evidence rounds do not match the campaign",
+        "evidence warmup rounds do not match the campaign",
       first.copy(
         sampleRounds = first.sampleRounds + 1,
         scenarios = resizedScenarios) ->
-        "evidence rounds do not match the campaign",
+        "evidence sample rounds do not match the campaign",
       first.copy(scenarios = first.scenarios.updated(
         0,
         first.scenarios.head.copy(expectedOutcome = "raw-seal-malformed-proof"))) ->
@@ -276,6 +305,14 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
           fixture.manifestBytes,
           fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
           Left("evidence environment does not match the declared cell policy")
+        resolveRunPolicy(
+          fixture.manifestBytes,
+          payload.campaignBinding.get.runId,
+          payload.implementationRevision,
+          payload.warmupRounds,
+          payload.sampleRounds,
+          payload.environment) shouldBe
+          Left("evidence environment does not match the declared cell policy")
       }
     }
 
@@ -289,8 +326,216 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
           fixture.manifestBytes,
           fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
           Left("evidence JVM argument identity does not match the declared cell policy")
+        resolveRunPolicy(
+          fixture.manifestBytes,
+          payload.campaignBinding.get.runId,
+          payload.implementationRevision,
+          payload.warmupRounds,
+          payload.sampleRounds,
+          payload.environment) shouldBe
+          Left("evidence JVM argument identity does not match the declared cell policy")
       }
     }
+  }
+
+  test("shared run-policy resolver selects every run from the exact manifest bytes") {
+    val fixture = campaignFixture()
+    val exact = rightValue(parseExactCampaignManifest(fixture.manifestBytes))
+    exact.manifest shouldBe fixture.manifest
+    exact.byteLength shouldBe fixture.manifestBytes.length
+    exact.sha256 shouldBe sha256Hex(fixture.manifestBytes)
+    val mutableSource = fixture.manifestBytes.clone()
+    val frozen = rightValue(parseExactCampaignManifest(mutableSource))
+    mutableSource(0) = (mutableSource(0) ^ 1).toByte
+    frozen.manifest shouldBe fixture.manifest
+    frozen.byteLength shouldBe fixture.manifestBytes.length
+    frozen.sha256 shouldBe sha256Hex(fixture.manifestBytes)
+
+    fixture.manifest.runs.zip(fixture.payloads).foreach { case (run, payload) =>
+      val binding = payload.campaignBinding.get
+      val resolved = rightValue(resolveRunPolicy(
+        exact,
+        binding,
+        payload.implementationRevision,
+        payload.warmupRounds,
+        payload.sampleRounds,
+        payload.environment))
+      val expectedCell = fixture.manifest.cells.find(_.id == run.cellId).get
+      resolved.run shouldBe run
+      resolved.cell shouldBe expectedCell
+      resolved.environmentPolicy.id shouldBe expectedCell.environmentPolicyId
+      resolved.jvmArgumentPolicy.id shouldBe expectedCell.jvmArgumentPolicyId
+      resolved.campaignBinding shouldBe binding
+
+      rightValue(resolveRunPolicy(
+        fixture.manifestBytes,
+        run.id,
+        payload.implementationRevision,
+        payload.warmupRounds,
+        payload.sampleRounds,
+        payload.environment)) shouldBe resolved
+    }
+  }
+
+  test("run-policy resolver isolates identity, configuration, and cross-cell failures") {
+    val fixture = campaignFixture()
+    val exact = rightValue(parseExactCampaignManifest(fixture.manifestBytes))
+    val first = fixture.payloads.head
+    val binding = first.campaignBinding.get
+
+    def resolve(
+        selectedBinding: CampaignBinding = binding,
+        revision: String = first.implementationRevision,
+        warmup: Int = first.warmupRounds,
+        samples: Int = first.sampleRounds,
+        environment: EnvironmentMetadata = first.environment): Either[String, ResolvedRunPolicy] =
+      resolveRunPolicy(
+        exact,
+        selectedBinding,
+        revision,
+        warmup,
+        samples,
+        environment)
+
+    resolve(binding.copy(runId = "cell-z:r1")) shouldBe
+      Left("evidence run ID is not declared by the campaign")
+    resolve(revision = "commit:0000000000000000000000000000000000000000") shouldBe
+      Left("evidence implementation revision does not match the campaign")
+    resolve(warmup = first.warmupRounds + 1) shouldBe
+      Left("evidence warmup rounds do not match the campaign")
+    resolve(samples = first.sampleRounds + 1) shouldBe
+      Left("evidence sample rounds do not match the campaign")
+    resolve(binding.copy(runId = fixture.manifest.runs(2).id)) shouldBe
+      Left("evidence environment does not match the declared cell policy")
+    resolve(binding.copy(manifestByteLength = binding.manifestByteLength + 1)) shouldBe
+      Left("evidence manifest binding does not match the exact campaign bytes")
+    resolve(binding.copy(manifestSha256 = "f" * 64)) shouldBe
+      Left("evidence manifest binding does not match the exact campaign bytes")
+
+    val nonCanonical = new String(fixture.manifestBytes, StandardCharsets.UTF_8)
+      .replace("\"campaignId\":", " \"campaignId\":")
+      .getBytes(StandardCharsets.UTF_8)
+    resolveRunPolicy(
+      nonCanonical,
+      binding.runId,
+      first.implementationRevision,
+      first.warmupRounds,
+      first.sampleRounds,
+      first.environment) shouldBe Left("campaign manifest is not canonical JSON")
+  }
+
+  test("every benchmark campaign-policy failure precedes verifier setup and output") {
+    val fixture = campaignFixture()
+    val directory = Files.createTempDirectory("eip0045-campaign-producer-preflight-")
+    val manifestPath = directory.resolve("manifest.json")
+    val nonCanonicalPath = directory.resolve("noncanonical-manifest.json")
+    try {
+      Files.write(manifestPath, fixture.manifestBytes)
+      val nonCanonical = new String(fixture.manifestBytes, StandardCharsets.UTF_8)
+        .replace("\"campaignId\":", " \"campaignId\":")
+        .getBytes(StandardCharsets.UTF_8)
+      Files.write(nonCanonicalPath, nonCanonical)
+
+      final case class FailureCase(
+          id: String,
+          selectedManifest: Path,
+          runId: String,
+          revision: String,
+          warmupRounds: Int,
+          sampleRounds: Int,
+          expected: String)
+      val cases = Vector(
+        FailureCase(
+          "unknown-run",
+          manifestPath,
+          "cell-z:r1",
+          fixture.manifest.implementationRevision,
+          fixture.manifest.warmupRounds,
+          fixture.manifest.sampleRounds,
+          "evidence run ID is not declared by the campaign"),
+        FailureCase(
+          "revision",
+          manifestPath,
+          fixture.manifest.runs.head.id,
+          "commit:0000000000000000000000000000000000000000",
+          fixture.manifest.warmupRounds,
+          fixture.manifest.sampleRounds,
+          "evidence implementation revision does not match the campaign"),
+        FailureCase(
+          "warmup",
+          manifestPath,
+          fixture.manifest.runs.head.id,
+          fixture.manifest.implementationRevision,
+          fixture.manifest.warmupRounds + 1,
+          fixture.manifest.sampleRounds,
+          "evidence warmup rounds do not match the campaign"),
+        FailureCase(
+          "samples",
+          manifestPath,
+          fixture.manifest.runs.head.id,
+          fixture.manifest.implementationRevision,
+          fixture.manifest.warmupRounds,
+          fixture.manifest.sampleRounds + 1,
+          "evidence sample rounds do not match the campaign"),
+        FailureCase(
+          "environment",
+          manifestPath,
+          fixture.manifest.runs.head.id,
+          fixture.manifest.implementationRevision,
+          fixture.manifest.warmupRounds,
+          fixture.manifest.sampleRounds,
+          "evidence environment does not match the declared cell policy"),
+        FailureCase(
+          "noncanonical",
+          nonCanonicalPath,
+          fixture.manifest.runs.head.id,
+          fixture.manifest.implementationRevision,
+          fixture.manifest.warmupRounds,
+          fixture.manifest.sampleRounds,
+          "campaign manifest is not canonical JSON"))
+
+      cases.foreach { item =>
+        var verifierSetups = 0
+        var outputAttempts = 0
+        val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+          override def beforeVerifierSetup(): Unit = verifierSetups += 1
+          override def beforeOutput(): Unit = outputAttempts += 1
+        }
+        val outputPath = directory.resolve(item.id + "-evidence.json")
+        val error = intercept[IllegalArgumentException] {
+          Eip0045VerifierBenchmark.runWithObserverForTest(Array(
+            "--warmup-rounds", item.warmupRounds.toString,
+            "--sample-rounds", item.sampleRounds.toString,
+            "--implementation-revision", item.revision,
+            "--cpu-model", "Reference CPU A",
+            "--campaign-manifest", item.selectedManifest.toString,
+            "--campaign-run-id", item.runId,
+            "--output", outputPath.toString), observer)
+        }
+        withClue(item.id + ": ") {
+          error.getMessage shouldBe item.expected
+          verifierSetups shouldBe 0
+          outputAttempts shouldBe 0
+          Files.exists(outputPath) shouldBe false
+        }
+      }
+
+      var diagnosticVerifierSetups = 0
+      var diagnosticOutputAttempts = 0
+      val diagnosticObserver = new Eip0045VerifierBenchmark.ExecutionObserver {
+        override def beforeVerifierSetup(): Unit = diagnosticVerifierSetups += 1
+        override def beforeOutput(): Unit = diagnosticOutputAttempts += 1
+      }
+      val diagnosticOutput = directory.resolve("diagnostic-evidence.json")
+      Eip0045VerifierBenchmark.runWithObserverForTest(Array(
+        "--warmup-rounds", "0",
+        "--sample-rounds", "1",
+        "--cpu-model", "Reference CPU A",
+        "--output", diagnosticOutput.toString), diagnosticObserver)
+      diagnosticVerifierSetups shouldBe 1
+      diagnosticOutputAttempts shouldBe 1
+      Files.isRegularFile(diagnosticOutput) shouldBe true
+    } finally deleteTree(directory)
   }
 
   test("payload digest and raw-sample statistics are semantically recomputed") {

@@ -111,6 +111,22 @@ private[benchmark] object Eip0045CampaignContract {
       cells: Vector[CampaignCell],
       runs: Vector[CampaignRun])
 
+  /** One immutable interpretation of the exact manifest byte snapshot. The
+    * parser and SHA-256 calculation consume the same defensive copy.
+    */
+  final case class ExactCampaignManifest private (
+      manifest: CampaignManifestV1,
+      byteLength: Int,
+      sha256: String)
+
+  /** Fully joined policy selected for one declared campaign run. */
+  final case class ResolvedRunPolicy(
+      run: CampaignRun,
+      cell: CampaignCell,
+      environmentPolicy: EnvironmentPolicy,
+      jvmArgumentPolicy: JvmArgumentPolicy,
+      campaignBinding: CampaignBinding)
+
   final case class ArchiveEntry(
       runId: String,
       evidenceByteLength: Int,
@@ -194,7 +210,7 @@ private[benchmark] object Eip0045CampaignContract {
     "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
     "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
     "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.",
-    "Campaign binding content-binds manifest bytes and a run ID but does not validate manifest semantics, run membership, or campaign policy compliance.")
+    "Campaign mode parses the exact manifest bytes and matches the selected run, implementation revision, rounds, environment policy, and ordered JVM-input-argument identity before verifier setup.")
 
   sealed trait JsonValue
   final case class JsonObject(fields: Vector[(String, JsonValue)]) extends JsonValue
@@ -241,6 +257,94 @@ private[benchmark] object Eip0045CampaignContract {
           case error: DecodeFailure => Left(error.getMessage)
         }
     }
+  }
+
+  /** Parses and hashes one defensive byte snapshot so canonical semantics and
+    * the published manifest identity cannot be derived from different input
+    * arrays.
+    */
+  def parseExactCampaignManifest(
+      bytes: Array[Byte]): Either[String, ExactCampaignManifest] = {
+    if (bytes == null) return Left("campaign manifest bytes are null")
+    val exactBytes = bytes.clone()
+    parseManifest(exactBytes) match {
+      case Left(detail) => Left(detail)
+      case Right(manifest) => Right(ExactCampaignManifest(
+        manifest,
+        exactBytes.length,
+        sha256Hex(exactBytes)))
+    }
+  }
+
+  /** Producer entry point: parse the exact manifest bytes, derive their
+    * identity, select run -> cell -> environment/JVM policies, and require the
+    * observed configuration to match before benchmark verifier setup.
+    */
+  def resolveRunPolicy(
+      manifestBytes: Array[Byte],
+      runId: String,
+      implementationRevision: String,
+      warmupRounds: Int,
+      sampleRounds: Int,
+      environment: EnvironmentMetadata): Either[String, ResolvedRunPolicy] = {
+    parseExactCampaignManifest(manifestBytes) match {
+      case Left(detail) => Left(detail)
+      case Right(exact) =>
+        val binding = CampaignBinding(runId, exact.byteLength, exact.sha256)
+        resolveRunPolicy(
+          exact,
+          binding,
+          implementationRevision,
+          warmupRounds,
+          sampleRounds,
+          environment)
+    }
+  }
+
+  /** Consumer entry point: reuse the same joined policy while additionally
+    * checking a claimed evidence binding against the exact parsed bytes.
+    */
+  def resolveRunPolicy(
+      exact: ExactCampaignManifest,
+      binding: CampaignBinding,
+      implementationRevision: String,
+      warmupRounds: Int,
+      sampleRounds: Int,
+      environment: EnvironmentMetadata): Either[String, ResolvedRunPolicy] = {
+    if (exact == null) return Left("exact campaign manifest is null")
+    if (binding == null) return Left("evidence campaign binding is missing")
+    if (environment == null) return Left("evidence environment is missing")
+    if (binding.manifestByteLength != exact.byteLength ||
+        binding.manifestSha256 != exact.sha256)
+      return Left("evidence manifest binding does not match the exact campaign bytes")
+
+    val manifest = exact.manifest
+    if (implementationRevision != manifest.implementationRevision)
+      return Left("evidence implementation revision does not match the campaign")
+    if (warmupRounds != manifest.warmupRounds)
+      return Left("evidence warmup rounds do not match the campaign")
+    if (sampleRounds != manifest.sampleRounds)
+      return Left("evidence sample rounds do not match the campaign")
+    val run = manifest.runs.find(_.id == binding.runId) match {
+      case Some(value) => value
+      case None => return Left("evidence run ID is not declared by the campaign")
+    }
+    val cell = manifest.cells.find(_.id == run.cellId).get
+    val environmentPolicy = manifest.environmentPolicies
+      .find(_.id == cell.environmentPolicyId).get
+    val jvmArgumentPolicy = manifest.jvmArgumentPolicies
+      .find(_.id == cell.jvmArgumentPolicyId).get
+    if (!environmentMatches(environment, environmentPolicy))
+      return Left("evidence environment does not match the declared cell policy")
+    if (environment.jvmInputArgumentCount != jvmArgumentPolicy.argumentCount ||
+        environment.jvmInputArgumentsSha256 != jvmArgumentPolicy.argumentsSha256)
+      return Left("evidence JVM argument identity does not match the declared cell policy")
+    Right(ResolvedRunPolicy(
+      run,
+      cell,
+      environmentPolicy,
+      jvmArgumentPolicy,
+      CampaignBinding(run.id, exact.byteLength, exact.sha256)))
   }
 
   def validateManifest(manifest: CampaignManifestV1): Either[String, Unit] = {
@@ -498,6 +602,28 @@ private[benchmark] object Eip0045CampaignContract {
       return Left("campaign garbage collector policy is invalid")
     Right(())
   }
+
+  private[benchmark] def environmentMatches(
+      actual: EnvironmentMetadata,
+      expected: EnvironmentPolicy): Boolean =
+    actual != null && expected != null &&
+      actual.javaRuntimeName == expected.javaRuntimeName &&
+      actual.javaRuntimeVersion == expected.javaRuntimeVersion &&
+      actual.javaVmName == expected.javaVmName &&
+      actual.javaVmVendor == expected.javaVmVendor &&
+      actual.javaVmVersion == expected.javaVmVersion &&
+      actual.javaVmInfo == expected.javaVmInfo &&
+      actual.scalaVersion == expected.scalaVersion &&
+      actual.osName == expected.osName &&
+      actual.osVersion == expected.osVersion &&
+      actual.osArch == expected.osArch &&
+      actual.availableProcessors == expected.availableProcessors &&
+      actual.maxHeapBytes == expected.maxHeapBytes &&
+      actual.jitCompiler == expected.jitCompiler &&
+      actual.garbageCollectors == expected.garbageCollectors &&
+      actual.threadAllocationMeter == expected.threadAllocationMeter &&
+      actual.cpuModel == expected.cpuModel &&
+      actual.cpuModelSource == expected.cpuModelSource
 
   private def isPublicText(value: String): Boolean =
     value != null && value.nonEmpty && value.length <= MaxPublicStringCharacters &&
