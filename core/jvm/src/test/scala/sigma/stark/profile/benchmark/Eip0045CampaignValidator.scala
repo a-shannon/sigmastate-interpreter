@@ -57,7 +57,7 @@ object Eip0045CampaignValidator {
 
   private final case class ManifestContext(
       exact: ExactCampaignManifest) {
-    def manifest: CampaignManifestV1 = exact.manifest
+    def manifest: CampaignManifestV2 = exact.manifest
     def byteLength: Int = exact.byteLength
     def sha256: String = exact.sha256
   }
@@ -350,7 +350,7 @@ object Eip0045CampaignValidator {
           catch {
             case _: IllegalArgumentException => fail("evidence payload semantics are invalid")
           }
-          if (rerendered != text) fail("evidence file is not canonical V3 JSON")
+          if (rerendered != text) fail("evidence file is not canonical V4 JSON")
           validateAgainstManifest(context, payload) match {
             case Left(detail) => Left(detail)
             case Right(runId) => Right(DecodedEvidence(runId, recordedDigest))
@@ -412,6 +412,8 @@ object Eip0045CampaignValidator {
         "id",
         "expectedOutcome",
         "validationQueryCheckpoints",
+        "validationBoundary",
+        "lastVerifierCheckpoint",
         "samplesNs",
         "statistics",
         "allocatedBytes",
@@ -426,6 +428,10 @@ object Eip0045CampaignValidator {
         requireString(item("id"), "evidence scenario ID"),
         requireString(item("expectedOutcome"), "evidence scenario outcome"),
         requireInt(item("validationQueryCheckpoints"), "evidence scenario checkpoints"),
+        requireString(item("validationBoundary"), "evidence scenario validation boundary"),
+        requireString(
+          item("lastVerifierCheckpoint"),
+          "evidence scenario last verifier checkpoint"),
         requireLongArray(item("samplesNs"), "evidence timing samples"),
         TimingStatistics(
           requireInt(timing("sampleCount"), "timing sample count"),
@@ -541,12 +547,14 @@ object Eip0045CampaignValidator {
       ScenarioPolicy(
         scenario.id,
         scenario.expectedOutcome,
-        scenario.validationQueryCheckpoints)
+        scenario.validationQueryCheckpoints,
+        scenario.validationBoundary,
+        scenario.lastVerifierCheckpoint)
     }
     if (scenarioPolicies != manifest.scenarios)
       return Left("evidence scenarios do not match the campaign")
     if (payload.limitations != ExpectedCampaignLimitations)
-      return Left("evidence limitations do not match campaign-mode V3")
+      return Left("evidence limitations do not match campaign-mode V4")
     try {
       if (Instant.parse(payload.startedAtUtc).toString != payload.startedAtUtc)
         return Left("evidence start time is not canonical UTC")

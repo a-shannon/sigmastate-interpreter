@@ -13,7 +13,15 @@ import java.time.Instant
 
 import sigma.stark.FriVerifier
 import sigma.stark.profile.{RawSealV1Decoder, Risc0ProfilePackageLoader, Risc0RawSealVerifier}
-import sigma.stark.profile.Risc0RawSealVerifier.{Failure, Probe, Verified}
+import sigma.stark.profile.Risc0RawSealVerifier.{
+  ClaimMismatch,
+  ControlIdNotAllowed,
+  Failure,
+  MalformedProof,
+  Probe,
+  TransportRejected,
+  Verified
+}
 import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
 import sigma.stark.profile.benchmark.Eip0045CampaignContract._
 
@@ -23,10 +31,11 @@ import scala.util.Properties
 
 /** Opt-in B5 evidence harness for the EIP-0045 stock-profile JVM verifier.
   *
-  * Run this object explicitly with `coreJVM/Test/runMain`; it is deliberately
-  * not a ScalaTest suite and therefore adds no work or timing noise to normal
-  * tests. Each run authenticates the frozen B1/B2/B3 package through the
-  * production loader, validates all four scenario paths, warms them in a
+  * Full benchmark campaigns run explicitly with `coreJVM/Test/runMain`. The
+  * object is not itself a ScalaTest suite; focused support tests call it only
+  * for bounded zero-warmup, one-sample smoke runs. Each run authenticates the
+  * frozen B1/B2/B3 package through the production loader, validates all five
+  * scenario paths, warms them in a
   * rotating schedule, then records one complete verifier invocation per
   * sample. It never derives or recommends a consensus fixedJit value.
   */
@@ -53,16 +62,21 @@ object Eip0045VerifierBenchmark {
     override def beforeOutput(): Unit = ()
   }
 
-  private final class QueryProbe extends Probe {
+  private final class ValidationProbe extends Probe {
     var queries: Int = 0
-    override def onCheckpoint(label: String, _values: Array[Int]): Unit =
+    var lastCheckpoint: String = "none"
+    override def onCheckpoint(label: String, _values: Array[Int]): Unit = {
+      lastCheckpoint = label
       if (label == "query") queries += 1
+    }
   }
 
   private final case class Scenario(
       id: String,
       expectedOutcome: String,
       expectedQueries: Int,
+      expectedValidationBoundary: String,
+      expectedLastCheckpoint: String,
       run: () => Either[Failure, Verified],
       runWithProbe: Probe => Either[Failure, Verified])
 
@@ -76,6 +90,11 @@ object Eip0045VerifierBenchmark {
       timingSamples: Array[Array[Long]],
       allocationSamples: Array[Array[Long]],
       garbageCollectorDeltas: Vector[GarbageCollectorDelta])
+
+  private final case class ValidationResult(
+      queryCheckpoints: Int,
+      boundary: String,
+      lastVerifierCheckpoint: String)
 
   private final class ThreadAllocationMeter(
       bean: com.sun.management.ThreadMXBean,
@@ -96,6 +115,14 @@ object Eip0045VerifierBenchmark {
   private[benchmark] def runWithObserverForTest(
       args: Array[String],
       observer: ExecutionObserver): Unit = run(args, observer)
+
+  private[benchmark] def currentEnvironmentForTest(
+      declaredCpuModel: String): EnvironmentMetadata = {
+    val meter = openThreadAllocationMeter()
+    environmentMetadata(
+      Config(0, 1, None, Some(declaredCpuModel), "commit:" + ("0" * 40), None, None),
+      meter.description)
+  }
 
   private def run(args: Array[String], observer: ExecutionObserver): Unit = {
     if (observer == null)
@@ -123,7 +150,7 @@ object Eip0045VerifierBenchmark {
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
-    val validationQueries = scenarios.map(validateScenario)
+    val validation = scenarios.map(validateScenario)
     warmUp(scenarios, config.warmupRounds)
     val measurements = measure(scenarios, config.sampleRounds, allocationMeter)
 
@@ -142,7 +169,9 @@ object Eip0045VerifierBenchmark {
       ScenarioEvidence(
         scenarios(i).id,
         scenarios(i).expectedOutcome,
-        validationQueries(i),
+        validation(i).queryCheckpoints,
+        validation(i).boundary,
+        validation(i).lastVerifierCheckpoint,
         sampleVector,
         summary,
         allocationVector,
@@ -331,6 +360,13 @@ object Eip0045VerifierBenchmark {
     lateMutation(mutationOffset) = (lateMutation(mutationOffset) ^ 1).toByte
     val lateMutationChunks = canonicalChunks(lateMutation)
 
+    val earlyCanonicalMutation = fixture.rawSeal.clone()
+    earlyCanonicalMutation(132) = (earlyCanonicalMutation(132) ^ 1).toByte
+    val earlyCanonicalMutationChunks = canonicalChunks(earlyCanonicalMutation)
+    require(
+      RawSealV1Decoder.decode(earlyCanonicalMutationChunks).isRight,
+      "early cryptographic mutation is not a canonical raw seal")
+
     val earlyRejectedChunks = Array(
       java.util.Arrays.copyOfRange(fixture.rawSeal, 0, 65534),
       java.util.Arrays.copyOfRange(fixture.rawSeal, 65534, 131070),
@@ -342,30 +378,49 @@ object Eip0045VerifierBenchmark {
         "valid-proof",
         "verified:1:15",
         FriVerifier.Queries,
+        "verification-complete",
+        "query",
         () => fixture.verifier.verify(validChunks, fixture.expectedClaim),
         probe => fixture.verifier.verify(validChunks, fixture.expectedClaim, probe)),
-      Scenario(
-        "late-claim-mismatch",
-        "raw-seal-claim-mismatch",
-        FriVerifier.Queries,
-        () => fixture.verifier.verify(validChunks, wrongClaim),
-        probe => fixture.verifier.verify(validChunks, wrongClaim, probe)),
-      Scenario(
-        "late-cryptographic-mutation",
-        "raw-seal-malformed-proof",
-        FriVerifier.Queries,
-        () => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim),
-        probe => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim, probe)),
       Scenario(
         "early-transport-rejection",
         "raw-seal-transport-rejected",
         0,
+        "transport-chunk-shape",
+        "none",
         () => fixture.verifier.verify(earlyRejectedChunks, fixture.expectedClaim),
-        probe => fixture.verifier.verify(earlyRejectedChunks, fixture.expectedClaim, probe)))
+        probe => fixture.verifier.verify(earlyRejectedChunks, fixture.expectedClaim, probe)),
+      Scenario(
+        "early-canonical-cryptographic-rejection",
+        "raw-seal-control-id-not-allowed",
+        0,
+        "terminal-control-allowlist",
+        "group_root_code",
+        () => fixture.verifier.verify(earlyCanonicalMutationChunks, fixture.expectedClaim),
+        probe => fixture.verifier.verify(
+          earlyCanonicalMutationChunks,
+          fixture.expectedClaim,
+          probe)),
+      Scenario(
+        "late-cryptographic-mutation",
+        "raw-seal-malformed-proof",
+        FriVerifier.Queries,
+        "fri",
+        "query",
+        () => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim),
+        probe => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim, probe)),
+      Scenario(
+        "late-claim-mismatch",
+        "raw-seal-claim-mismatch",
+        FriVerifier.Queries,
+        "expected-claim-comparison",
+        "query",
+        () => fixture.verifier.verify(validChunks, wrongClaim),
+        probe => fixture.verifier.verify(validChunks, wrongClaim, probe)))
   }
 
-  private def validateScenario(scenario: Scenario): Int = {
-    val probe = new QueryProbe
+  private def validateScenario(scenario: Scenario): ValidationResult = {
+    val probe = new ValidationProbe
     val outcome = scenario.runWithProbe(probe)
     checkOutcome(scenario, outcome)
     if (probe.queries != scenario.expectedQueries) {
@@ -373,7 +428,30 @@ object Eip0045VerifierBenchmark {
         scenario.id + " reached " + probe.queries +
           " query checkpoints; expected " + scenario.expectedQueries)
     }
-    probe.queries
+    val boundary = validationBoundary(outcome)
+    if (boundary != scenario.expectedValidationBoundary) {
+      throw new IllegalStateException(
+        scenario.id + " reached validation boundary " + boundary +
+          "; expected " + scenario.expectedValidationBoundary)
+    }
+    if (probe.lastCheckpoint != scenario.expectedLastCheckpoint) {
+      throw new IllegalStateException(
+        scenario.id + " last verifier checkpoint was " + probe.lastCheckpoint +
+          "; expected " + scenario.expectedLastCheckpoint)
+    }
+    ValidationResult(probe.queries, boundary, probe.lastCheckpoint)
+  }
+
+  private def validationBoundary(outcome: Either[Failure, Verified]): String = outcome match {
+    case Right(_) => "verification-complete"
+    case Left(TransportRejected(_: RawSealV1Decoder.WrongChunkLength)) =>
+      "transport-chunk-shape"
+    case Left(ControlIdNotAllowed) => "terminal-control-allowlist"
+    case Left(MalformedProof(stage, _)) => stage
+    case Left(ClaimMismatch) => "expected-claim-comparison"
+    case Left(other) =>
+      throw new IllegalStateException(
+        "unclassified validation failure: " + other.code)
   }
 
   private def warmUp(scenarios: Vector[Scenario], rounds: Int): Unit = {

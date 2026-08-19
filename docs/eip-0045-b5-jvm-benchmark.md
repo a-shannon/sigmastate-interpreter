@@ -1,28 +1,30 @@
 # EIP-0045 JVM verifier timing and resource evidence
 
-`Eip0045VerifierBenchmark` is an opt-in evidence tool for calibrating the
-fixed consensus charge of the stock-profile verifier. It is a JVM test-source
-`runMain`, not a test suite, so ordinary builds do not execute it.
+`Eip0045VerifierBenchmark` is a JVM test-source `runMain` for collecting
+evidence used to calibrate the stock-profile verifier's fixed consensus charge.
+Full campaigns are opt-in. The runner is not itself a ScalaTest suite, while
+focused support tests exercise bounded zero-warmup, one-sample smoke runs.
 
 The harness loads the checked-in B1, B2, and B3 resources through the
 production profile-package loader and hard-binds the candidate profile ID. It
-then measures four preconstructed paths:
+then measures five preconstructed paths:
 
 - a valid real RISC0 raw seal;
+- a wrong first transport-chunk length rejected before cryptographic work;
+- a canonical raw-seal mutation rejected by the terminal control allowlist;
+- a mutation in the final proof word rejected in FRI after reaching all 50 proof-query checkpoints;
 - a claim mismatch reached after all proof queries;
-- a mutation in the final proof word reached through the cryptographic path;
-- a wrong first transport-chunk length rejected before cryptographic work.
 
 Each path is validated before timing. Warmup and sampling use a deterministic
 rotating round-robin order so no path permanently occupies one position. One
 sample is one complete `Risc0RawSealVerifier.verify` call. Profile loading,
-fixture construction, JSON serialization, and summary calculation are outside
-the timed samples. Version 3 records the current benchmark thread's
+fixture construction, validation probes, JSON serialization, and summary
+calculation are outside the timed samples. Version 4 records the current benchmark thread's
 allocated-byte delta around each invocation and process-wide garbage-collector
-count/time deltas across the complete sampling phase. It refuses to emit V3
+count/time deltas across the complete sampling phase. It refuses to emit V4
 evidence when either JVM counter is unavailable or moves backwards.
 
-V3 can also run under a declared campaign policy. The producer takes one
+V4 can also run under a declared campaign policy. The producer takes one
 defensive copy of the manifest bytes, parses that copy and computes its length
 and SHA-256. It then resolves run to cell to environment/JVM policy. Revision,
 warmup rounds, sample rounds, the 17 environment fields and the JVM argument
@@ -70,27 +72,28 @@ The output is canonical, single-line UTF-8 JSON containing:
   raw argument strings;
 - every raw nanosecond sample plus nearest-rank p50, p95, p99, and maximum;
 - every current-thread allocated-byte sample plus the same percentile summary;
+- the validation-only boundary and last verifier checkpoint for each scenario;
 - process-wide collection-count and collection-time deltas for every reported
   garbage collector during the sampling phase;
 - the benchmark method and explicit scope limitations.
 
-The V3 `evidenceDigest` is:
+The V4 `evidenceDigest` is:
 
 ```text
-SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v3") || 0x00 || UTF8(payload))
+SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v4") || 0x00 || UTF8(payload))
 ```
 
 Here `payload` is the exact compact JSON object stored in the top-level
 `payload` field. The top-level `canonicalization` value identifies the fixed
 field-order, no-whitespace encoding used by this version. Raw samples are kept
 so reviewers can independently recompute every percentile. This digest binds
-the exact payload bytes under the fixed V3 domain. Consumers must independently
+the exact payload bytes under the fixed V4 domain. Consumers must independently
 require the exact top-level `schema`, `digestAlgorithm`, `digestDomain`, and
 `canonicalization` values. Whole-file identity requires a separate full-file
 hash. The evidence digest is not an operator signature or proof that a claimed
 run actually occurred.
 
-For JVM input arguments, V3 hashes the ASCII domain
+For JVM input arguments, V4 retains the separate ASCII domain
 `Ergo.EIP0045.B5.JvmInputArguments.v1`, a zero byte, the unsigned 32-bit
 big-endian argument count, then each strict UTF-8 argument prefixed by its
 unsigned 32-bit big-endian byte length. Reordering arguments or moving bytes
@@ -110,15 +113,15 @@ publishing the raw vector.
 
 ## Campaign manifest and archive validation
 
-`Eip0045CampaignValidator` consumes a canonical `CampaignManifestV1` and the
-V3 evidence files named by that campaign. The manifest fixes the candidate
+`Eip0045CampaignValidator` consumes a canonical `CampaignManifestV2` and the
+V4 evidence files named by that campaign. The manifest fixes the candidate
 profile, implementation revision, verifier entry point, seven resource
-identities, four scenarios, warmup and sample rounds, and every V3 format
+identities, five scenarios, warmup and sample rounds, and every V4 format
 constant used by the producer. Revision identities use either
 `commit:` followed by 40 lowercase hexadecimal digits or `tree-sha256:`
 followed by a 64-digit lowercase digest.
 
-The manifest and archive-index V1 canonicalization identifiers say exactly
+The manifest V2 and archive-index V1 canonicalization identifiers say exactly
 what the encoders write: fixed field order, no whitespace between JSON tokens,
 and one terminal LF byte. The LF is part of the file identity.
 
@@ -138,7 +141,7 @@ For example, the first archive pass is:
 sbt -batch "project coreJVM" "Test / runMain sigma.stark.profile.benchmark.Eip0045CampaignValidator --manifest CAMPAIGN_MANIFEST --evidence RUN_1_JSON --evidence RUN_2_JSON --output ARCHIVE_INDEX"
 ```
 
-The validator reads only bounded regular files. It requires exactly one V3
+The validator reads only bounded regular files. It requires exactly one V4
 evidence file for every declared run, recomputes the payload digest and sample
 summaries, checks collector metadata, and compares all campaign-bound fields
 with the selected cell. Producer and validator call the same pure run-policy
@@ -177,10 +180,10 @@ directory entries.
 
 The resulting index is deterministic and contains no local paths. Entries are
 sorted by run ID and bind each complete evidence file by byte length and
-SHA-256, alongside its V3 payload digest. Preserve that index as a reviewed
+SHA-256, alongside its V4 payload digest. Preserve that index as a reviewed
 campaign artifact. A later replay can supply it with `--expected-index`; this
 detects changes even when someone has coordinated new raw samples, summaries,
-collector deltas and a matching V3 payload digest.
+collector deltas and a matching V4 payload digest.
 
 Canonical JSON and full-file hashes provide content identity. They do not
 authenticate an operator, prove host isolation, establish that a measurement
@@ -194,8 +197,8 @@ A successful run is digest-bound evidence for one verifier build, JVM process
 and host under the recorded conditions. In campaign mode it also identifies
 the exact canonical manifest bytes, one declared run and the selected
 environment/JVM policy observed for that process. It can expose the gap between
-an early transport rejection and the valid/late-rejection floor, and it can
-contribute to cost calibration.
+transport parsing, an early canonical cryptographic rejection, FRI rejection
+and the final claim comparison. It can contribute to cost calibration.
 Its allocation samples are JVM-reported approximations of Java-heap allocation
 charged to the benchmark thread for each path, while its GC deltas show whether
 the complete sampling phase coincided with collector work.
@@ -203,6 +206,11 @@ the complete sampling phase coincided with collector work.
 It does not close B5 by itself, choose a `fixedJit`, measure node admission or
 ErgoTree preflight, control host scheduling or thermals, or replace the
 multi-host/repeated-operator campaign required before activation.
+
+The harness uses one po2-15 fixture. It does not cover the 11 positive profile
+cases, run a complete operation/allocation census, exercise the full
+Sigma/transaction path, measure dispatch, or attest the source build that
+produced the verifier bytes.
 
 Run-policy resolution does not attest the operator, prove host isolation or
 show that a particular JVM invocation occurred. The archive validator checks
@@ -214,6 +222,10 @@ scenario-specific GC pause, or the complete GC/resource envelope. Those remain
 separate B5 obligations. The current-thread counter and process-wide GC deltas
 are observations, not memory-safety or concurrency bounds.
 
+The boundary and checkpoint fields come from the untimed validation call. They
+record where that call stopped under the typed verifier result and probe labels.
+They are not operation counts, cost bounds or measurements of the timed calls.
+
 ## Retained local diagnostic
 
 The repository retains one explicitly non-closing V1 timing-only local run in
@@ -221,6 +233,9 @@ The repository retains one explicitly non-closing V1 timing-only local run in
 `15049a63cbf7c7fa43e1dc66a669b98a57988cc22c0cc0d6f53b0983a98ff64b`,
 Microsoft OpenJDK 17.0.18, one 16-logical-processor Intel host, 15 rotating
 warmup rounds, and 100 samples per scenario.
+
+This older diagnostic predates the V4 five-path boundary contract. It has four
+scenarios and cannot be promoted to V4 campaign evidence.
 
 | Scenario | Query checkpoints | p50 | p95 | p99 | maximum |
 |---|---:|---:|---:|---:|---:|

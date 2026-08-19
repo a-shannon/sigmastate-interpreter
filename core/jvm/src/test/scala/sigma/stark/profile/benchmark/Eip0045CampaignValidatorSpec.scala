@@ -41,10 +41,10 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     }
   }
 
-  test("manifest parsing requires exact canonical bytes and the frozen V3 contract") {
+  test("manifest parsing requires exact canonical bytes and the frozen V4 contract") {
     val fixture = campaignFixture()
     ManifestCanonicalization shouldBe
-      "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v1"
+      "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v2"
     new String(fixture.manifestBytes, StandardCharsets.UTF_8).count(_ == '\n') shouldBe 1
     new String(fixture.manifestBytes, StandardCharsets.UTF_8) should endWith("\n")
     parseManifest(fixture.manifestBytes) shouldBe Right(fixture.manifest)
@@ -54,12 +54,16 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       .replace("\"campaignId\":", " \"campaignId\":")
       .getBytes(StandardCharsets.UTF_8)
     parseManifest(nonCanonical) shouldBe Left("campaign manifest is not canonical JSON")
+    parseManifest(new String(fixture.manifestBytes, StandardCharsets.UTF_8)
+      .replace(ManifestSchema, "eip-0045-b5-campaign-manifest-v1")
+      .getBytes(StandardCharsets.UTF_8)) shouldBe
+      Left("campaign manifest schema is invalid")
 
     renderManifest(fixture.manifest.copy(profileId = "0" * 64)) shouldBe
       Left("campaign profile ID does not match the EIP-0045 candidate")
     renderManifest(fixture.manifest.copy(
       evidenceContract = ExpectedEvidenceContract.copy(clock = "wall-clock"))) shouldBe
-      Left("campaign V3 evidence contract is invalid")
+      Left("campaign V4 evidence contract is invalid")
     renderManifest(fixture.manifest.copy(implementationRevision = "commit:short")) shouldBe
       Left("campaign implementation revision is not an exact supported identity")
     renderManifest(fixture.manifest.copy(resources = ExpectedResources.reverse)) shouldBe
@@ -242,7 +246,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         first.scenarios.head.copy(expectedOutcome = "raw-seal-malformed-proof"))) ->
         "evidence scenarios do not match the campaign",
       first.copy(limitations = first.limitations :+ "join-negative") ->
-        "evidence limitations do not match campaign-mode V3",
+        "evidence limitations do not match campaign-mode V4",
       first.copy(startedAtUtc = "2026-08-17T00:00:00.000Z") ->
         "evidence start time is not canonical UTC")
     cases.foreach { case (payload, expected) =>
@@ -250,6 +254,44 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         fixture.manifestBytes,
         fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe Left(expected)
     }
+  }
+
+  test("scenario outcome, query count, boundary, checkpoint, and order are isolated") {
+    val fixture = campaignFixture()
+    val first = fixture.payloads.head
+    val scenario = first.scenarios.head
+    val mutations = Vector(
+      "outcome" -> first.copy(scenarios = first.scenarios.updated(
+        0,
+        scenario.copy(expectedOutcome = "raw-seal-malformed-proof"))),
+      "query-count" -> first.copy(scenarios = first.scenarios.updated(
+        0,
+        scenario.copy(validationQueryCheckpoints = scenario.validationQueryCheckpoints + 1))),
+      "boundary" -> first.copy(scenarios = first.scenarios.updated(
+        0,
+        scenario.copy(validationBoundary = "fri"))),
+      "checkpoint" -> first.copy(scenarios = first.scenarios.updated(
+        0,
+        scenario.copy(lastVerifierCheckpoint = "group_root_code"))),
+      "order" -> first.copy(scenarios = first.scenarios.reverse))
+    mutations.foreach { case (label, payload) =>
+      withClue(label + ": ") {
+        validateArchiveBytes(
+          fixture.manifestBytes,
+          fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
+          Left("evidence scenarios do not match the campaign")
+      }
+    }
+  }
+
+  test("V3 evidence is rejected by the exact V4 schema gate") {
+    val fixture = campaignFixture()
+    val oldSchema = new String(fixture.evidence.head, StandardCharsets.UTF_8)
+      .replace(Schema, "eip-0045-jvm-verifier-benchmark-v3")
+    validateArchiveBytes(
+      fixture.manifestBytes,
+      fixture.evidence.updated(0, bytes(oldSchema))) shouldBe
+      Left("evidence schema is invalid")
   }
 
   test("environment and ordered JVM argument identities are precommitted per cell") {
@@ -535,6 +577,70 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       diagnosticVerifierSetups shouldBe 1
       diagnosticOutputAttempts shouldBe 1
       Files.isRegularFile(diagnosticOutput) shouldBe true
+    } finally deleteTree(directory)
+  }
+
+  test("real producer evidence creates and replays one campaign archive index") {
+    val directory = Files.createTempDirectory("eip0045-campaign-real-e2e-")
+    val manifestPath = directory.resolve("manifest.json")
+    val evidencePath = directory.resolve("evidence.json")
+    val indexPath = directory.resolve("archive-index.json")
+    val cpuModel = "EIP-0045 test CPU"
+    val revision = "commit:" + ("1" * 40)
+    try {
+      val environment = Eip0045VerifierBenchmark.currentEnvironmentForTest(cpuModel)
+      val environmentPolicy = environmentPolicyFromMetadata("env-current", environment)
+      val argumentPolicy = JvmArgumentPolicy(
+        "args-current",
+        environment.jvmInputArgumentCount,
+        environment.jvmInputArgumentsSha256)
+      val manifest = CampaignManifestV2(
+        campaignId = "campaign-real-e2e",
+        profileId = ExpectedProfileId,
+        implementationRevision = revision,
+        verifierEntryPoint = ExpectedVerifierEntryPoint,
+        evidenceContract = ExpectedEvidenceContract,
+        resources = ExpectedResources,
+        warmupRounds = 0,
+        sampleRounds = 1,
+        scenarios = ExpectedScenarios,
+        environmentPolicies = Vector(environmentPolicy),
+        jvmArgumentPolicies = Vector(argumentPolicy),
+        cells = Vector(CampaignCell("cell-current", "env-current", "args-current", 1)),
+        runs = Vector(CampaignRun("cell-current:r1", "cell-current", 1)))
+      val manifestBytes = bytes(rightValue(renderManifest(manifest)))
+      Files.write(manifestPath, manifestBytes)
+
+      Eip0045VerifierBenchmark.main(Array(
+        "--warmup-rounds", "0",
+        "--sample-rounds", "1",
+        "--implementation-revision", revision,
+        "--cpu-model", cpuModel,
+        "--campaign-manifest", manifestPath.toString,
+        "--campaign-run-id", "cell-current:r1",
+        "--output", evidencePath.toString))
+
+      val evidenceBytes = Files.readAllBytes(evidencePath)
+      new String(evidenceBytes, StandardCharsets.UTF_8) should include(
+        "\"campaignBinding\":{\"runId\":\"cell-current:r1\"")
+      val created = rightValue(validateFiles(
+        manifestPath,
+        Vector(evidencePath),
+        None,
+        Some(indexPath)))
+      Files.readAllBytes(indexPath) shouldBe bytes(created)
+      validateFiles(
+        manifestPath,
+        Vector(evidencePath),
+        Some(indexPath),
+        None) shouldBe Right(created)
+
+      val synthetic = campaignFixture()
+      val missingBinding = synthetic.payloads.head.copy(campaignBinding = None)
+      validateArchiveBytes(
+        synthetic.manifestBytes,
+        synthetic.evidence.updated(0, bytes(renderEnvelope(missingBinding)))) shouldBe
+        Left("evidence campaign binding is missing")
     } finally deleteTree(directory)
   }
 
@@ -882,7 +988,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
   }
 
   private final class Fixture(
-      val manifest: CampaignManifestV1,
+      val manifest: CampaignManifestV2,
       val manifestBytes: Array[Byte],
       val payloads: Vector[EvidencePayload],
       val evidence: Vector[Array[Byte]])
@@ -892,7 +998,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     val environmentB = environmentPolicy("env-b", "Reference CPU B", 8192L)
     val argumentsA = JvmArgumentPolicy("args-a", 2, "a" * 64)
     val argumentsB = JvmArgumentPolicy("args-b", 3, "b" * 64)
-    val manifest = CampaignManifestV1(
+    val manifest = CampaignManifestV2(
       campaignId = "campaign-2026-08",
       profileId = ExpectedProfileId,
       implementationRevision = "commit:dd428dde103d4b69a85456ca176c97fe099f8908",
@@ -956,8 +1062,31 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       cpu,
       "--cpu-model")
 
+  private def environmentPolicyFromMetadata(
+      id: String,
+      environment: EnvironmentMetadata): EnvironmentPolicy =
+    EnvironmentPolicy(
+      id,
+      environment.javaRuntimeName,
+      environment.javaRuntimeVersion,
+      environment.javaVmName,
+      environment.javaVmVendor,
+      environment.javaVmVersion,
+      environment.javaVmInfo,
+      environment.scalaVersion,
+      environment.osName,
+      environment.osVersion,
+      environment.osArch,
+      environment.availableProcessors,
+      environment.maxHeapBytes,
+      environment.jitCompiler,
+      environment.garbageCollectors,
+      environment.threadAllocationMeter,
+      environment.cpuModel,
+      environment.cpuModelSource)
+
   private def evidencePayload(
-      manifest: CampaignManifestV1,
+      manifest: CampaignManifestV2,
       run: CampaignRun,
       environment: EnvironmentPolicy,
       arguments: JvmArgumentPolicy,
@@ -972,6 +1101,8 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         scenario.id,
         scenario.expectedOutcome,
         scenario.validationQueryCheckpoints,
+        scenario.validationBoundary,
+        scenario.lastVerifierCheckpoint,
         timings,
         rightValue(statistics(timings)),
         allocations,

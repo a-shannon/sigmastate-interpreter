@@ -17,9 +17,9 @@ import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
   * or production-runtime role.
   */
 private[benchmark] object Eip0045CampaignContract {
-  final val ManifestSchema: String = "eip-0045-b5-campaign-manifest-v1"
+  final val ManifestSchema: String = "eip-0045-b5-campaign-manifest-v2"
   final val ManifestCanonicalization: String =
-    "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v1"
+    "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v2"
   final val ArchiveIndexSchema: String =
     "eip-0045-b5-campaign-archive-index-v1"
   final val ArchiveIndexCanonicalization: String =
@@ -58,7 +58,9 @@ private[benchmark] object Eip0045CampaignContract {
   final case class ScenarioPolicy(
       id: String,
       expectedOutcome: String,
-      validationQueryCheckpoints: Int)
+      validationQueryCheckpoints: Int,
+      validationBoundary: String,
+      lastVerifierCheckpoint: String)
 
   final case class EnvironmentPolicy(
       id: String,
@@ -96,7 +98,7 @@ private[benchmark] object Eip0045CampaignContract {
       cellId: String,
       replicate: Int)
 
-  final case class CampaignManifestV1(
+  final case class CampaignManifestV2(
       campaignId: String,
       profileId: String,
       implementationRevision: String,
@@ -115,7 +117,7 @@ private[benchmark] object Eip0045CampaignContract {
     * parser and SHA-256 calculation consume the same defensive copy.
     */
   final case class ExactCampaignManifest private (
-      manifest: CampaignManifestV1,
+      manifest: CampaignManifestV2,
       byteLength: Int,
       sha256: String)
 
@@ -189,16 +191,32 @@ private[benchmark] object Eip0045CampaignContract {
       "7df5d428210065e9480b44d273db298b85c692e3eafbbe4db76fb00ba3bd84a3"))
 
   val ExpectedScenarios: Vector[ScenarioPolicy] = Vector(
-    ScenarioPolicy("valid-proof", "verified:1:15", 50),
-    ScenarioPolicy("late-claim-mismatch", "raw-seal-claim-mismatch", 50),
     ScenarioPolicy(
-      "late-cryptographic-mutation",
-      "raw-seal-malformed-proof",
-      50),
+      "valid-proof", "verified:1:15", 50, "verification-complete", "query"),
     ScenarioPolicy(
       "early-transport-rejection",
       "raw-seal-transport-rejected",
-      0))
+      0,
+      "transport-chunk-shape",
+      "none"),
+    ScenarioPolicy(
+      "early-canonical-cryptographic-rejection",
+      "raw-seal-control-id-not-allowed",
+      0,
+      "terminal-control-allowlist",
+      "group_root_code"),
+    ScenarioPolicy(
+      "late-cryptographic-mutation",
+      "raw-seal-malformed-proof",
+      50,
+      "fri",
+      "query"),
+    ScenarioPolicy(
+      "late-claim-mismatch",
+      "raw-seal-claim-mismatch",
+      50,
+      "expected-claim-comparison",
+      "query"))
 
   val ExpectedCampaignLimitations: Vector[String] = Vector(
     "This run measures one JVM process on one host and cannot close B5 by itself.",
@@ -210,6 +228,7 @@ private[benchmark] object Eip0045CampaignContract {
     "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
     "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
     "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.",
+    "Validation boundaries and last verifier checkpoints are probe-only observations; they are not operation counts, cost bounds, or timed-path measurements.",
     "Campaign mode parses the exact manifest bytes and matches the selected run, implementation revision, rounds, environment policy, and ordered JVM-input-argument identity before verifier setup.")
 
   sealed trait JsonValue
@@ -223,7 +242,7 @@ private[benchmark] object Eip0045CampaignContract {
   private[benchmark] final class DecodeFailure(message: String)
       extends IllegalArgumentException(message)
 
-  def renderManifest(manifest: CampaignManifestV1): Either[String, String] =
+  def renderManifest(manifest: CampaignManifestV2): Either[String, String] =
     validateManifest(manifest) match {
       case Left(detail) => Left(detail)
       case Right(_) =>
@@ -240,7 +259,7 @@ private[benchmark] object Eip0045CampaignContract {
         }
     }
 
-  def parseManifest(bytes: Array[Byte]): Either[String, CampaignManifestV1] = {
+  def parseManifest(bytes: Array[Byte]): Either[String, CampaignManifestV2] = {
     parseDocument(bytes, MaxCampaignManifestBytes, "campaign manifest") match {
       case Left(detail) => Left(detail)
       case Right((text, root)) =>
@@ -347,7 +366,7 @@ private[benchmark] object Eip0045CampaignContract {
       CampaignBinding(run.id, exact.byteLength, exact.sha256)))
   }
 
-  def validateManifest(manifest: CampaignManifestV1): Either[String, Unit] = {
+  def validateManifest(manifest: CampaignManifestV2): Either[String, Unit] = {
     if (manifest == null) return Left("campaign manifest is null")
     if (!isPublicId(manifest.campaignId)) return Left("campaign ID is invalid")
     if (manifest.profileId != ExpectedProfileId)
@@ -365,7 +384,7 @@ private[benchmark] object Eip0045CampaignContract {
     if (manifest.verifierEntryPoint != ExpectedVerifierEntryPoint)
       return Left("campaign verifier entry point is invalid")
     if (manifest.evidenceContract != ExpectedEvidenceContract)
-      return Left("campaign V3 evidence contract is invalid")
+      return Left("campaign V4 evidence contract is invalid")
     if (manifest.resources != ExpectedResources)
       return Left("campaign resources do not match the frozen benchmark resources")
     if (manifest.warmupRounds < 0 || manifest.warmupRounds > MaxWarmupRounds)
@@ -653,7 +672,7 @@ private[benchmark] object Eip0045CampaignContract {
     values != null && values.nonEmpty && values.forall(isPublicId) &&
       values == values.sorted && values.distinct.length == values.length
 
-  private def renderManifestUnchecked(manifest: CampaignManifestV1): String = {
+  private def renderManifestUnchecked(manifest: CampaignManifestV2): String = {
     val out = new StringBuilder(8192)
     out.append('{')
     stringField(out, "schema", ManifestSchema)
@@ -686,6 +705,11 @@ private[benchmark] object Eip0045CampaignContract {
         builder,
         "validationQueryCheckpoints",
         scenario.validationQueryCheckpoints.toLong)
+      comma(builder); stringField(builder, "validationBoundary", scenario.validationBoundary)
+      comma(builder); stringField(
+        builder,
+        "lastVerifierCheckpoint",
+        scenario.lastVerifierCheckpoint)
       builder.append('}')
     }
     comma(out); out.append(quote("environmentPolicies")).append(':')
@@ -782,7 +806,7 @@ private[benchmark] object Eip0045CampaignContract {
     out.toString()
   }
 
-  private def decodeManifest(root: JsonValue): CampaignManifestV1 = {
+  private def decodeManifest(root: JsonValue): CampaignManifestV2 = {
     val fields = exactObject(root, Vector(
       "schema",
       "canonicalization",
@@ -840,12 +864,19 @@ private[benchmark] object Eip0045CampaignContract {
       Vector("warmupRounds", "sampleRounds"), "campaign configuration")
     val scenarios = requireArray(fields("scenarios"), "campaign scenarios").map { value =>
       val item = exactObject(value,
-        Vector("id", "expectedOutcome", "validationQueryCheckpoints"),
+        Vector(
+          "id",
+          "expectedOutcome",
+          "validationQueryCheckpoints",
+          "validationBoundary",
+          "lastVerifierCheckpoint"),
         "campaign scenario")
       ScenarioPolicy(
         requireString(item("id"), "scenario ID"),
         requireString(item("expectedOutcome"), "scenario outcome"),
-        requireInt(item("validationQueryCheckpoints"), "scenario checkpoints"))
+        requireInt(item("validationQueryCheckpoints"), "scenario checkpoints"),
+        requireString(item("validationBoundary"), "scenario validation boundary"),
+        requireString(item("lastVerifierCheckpoint"), "scenario last verifier checkpoint"))
     }
     val environments = requireArray(
       fields("environmentPolicies"), "campaign environment policies").map(decodeEnvironment)
@@ -876,7 +907,7 @@ private[benchmark] object Eip0045CampaignContract {
         requireString(item("cellId"), "run cell ID"),
         requireInt(item("replicate"), "run replicate"))
     }
-    CampaignManifestV1(
+    CampaignManifestV2(
       requireString(fields("campaignId"), "campaign ID"),
       requireString(fields("profileId"), "campaign profile ID"),
       requireString(fields("implementationRevision"), "implementation revision"),

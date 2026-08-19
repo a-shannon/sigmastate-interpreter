@@ -207,13 +207,13 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
 
   test("domain-separated evidence digest has an independent golden value") {
     evidenceDigest("{\"a\":1}") shouldBe
-      "3ab4418ee6b3e716f02012b936bba5b4ee089ac5b39e9bd3c706730fcfe27eb0"
+      "92a6044ce2513c2951ebddca3bd1bda0574bb4feea58066b84125eede9da187e"
   }
 
   test("evidence envelope is canonical and binds raw samples and metadata") {
     val payload = samplePayload(Vector(10L, 20L))
     val rendered = renderEnvelope(payload)
-    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v3\"")
+    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v4\"")
     rendered should endWith("}\n")
     rendered should include("\"campaignBinding\":{\"runId\":\"host-a:run-01\",\"manifestByteLength\":9")
     rendered should include("\"samplesNs\":[10,20]")
@@ -221,6 +221,8 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
     rendered should include("\"allocatedBytes\":[100,200]")
     rendered should include("\"p99Bytes\":200")
     rendered should include("\"jvmInputArgumentCount\":2")
+    rendered should include("\"validationBoundary\":\"verification-complete\"")
+    rendered should include("\"lastVerifierCheckpoint\":\"query\"")
     rendered should include("\"garbageCollectorDeltas\":[{\"name\":\"gc\",\"collections\":1,\"collectionTimeMs\":2}]")
 
     val changed = renderEnvelope(samplePayload(Vector(10L, 21L)))
@@ -290,6 +292,18 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         environment = payload.environment.copy(jvmInputArgumentCount = -1)))
     }
     argumentsError.getMessage should include("JVM input argument count is invalid")
+
+    val emptyBoundaryError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(scenarios = Vector(
+        payload.scenarios.head.copy(validationBoundary = ""))))
+    }
+    emptyBoundaryError.getMessage should include("validation boundary is empty")
+
+    val nullCheckpointError = intercept[IllegalArgumentException] {
+      renderEnvelope(payload.copy(scenarios = Vector(
+        payload.scenarios.head.copy(lastVerifierCheckpoint = null))))
+    }
+    nullCheckpointError.getMessage should include("last verifier checkpoint is empty")
   }
 
   test("failed campaign manifest reads use constant errors and create no output") {
@@ -391,6 +405,8 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         "valid-proof",
         "verified:1:15",
         50,
+        "verification-complete",
+        "query",
         samples,
         summary,
         Vector(100L, 200L),

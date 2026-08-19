@@ -15,12 +15,12 @@ import java.security.MessageDigest
   * explicitly exercises it.
   */
 private[benchmark] object Eip0045BenchmarkSupport {
-  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v3"
+  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v4"
   final val DigestAlgorithm: String = "SHA-256"
-  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v3"
+  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v4"
   final val JvmInputArgumentsDigestDomain: String =
     "Ergo.EIP0045.B5.JvmInputArguments.v1"
-  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v3"
+  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v4"
   final val DefaultWarmupRounds: Int = 15
   final val DefaultSampleRounds: Int = 100
   final val MaxWarmupRounds: Int = 10000
@@ -104,6 +104,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
       id: String,
       expectedOutcome: String,
       validationQueryCheckpoints: Int,
+      validationBoundary: String,
+      lastVerifierCheckpoint: String,
       samplesNs: Vector[Long],
       statistics: TimingStatistics,
       allocatedBytes: Vector[Long],
@@ -587,6 +589,12 @@ private[benchmark] object Eip0045BenchmarkSupport {
       "scenario IDs are not unique")
     payload.scenarios.foreach { scenario =>
       require(
+        scenario.validationBoundary != null && scenario.validationBoundary.nonEmpty,
+        scenario.id + " validation boundary is empty")
+      require(
+        scenario.lastVerifierCheckpoint != null && scenario.lastVerifierCheckpoint.nonEmpty,
+        scenario.id + " last verifier checkpoint is empty")
+      require(
         scenario.samplesNs.length == payload.sampleRounds,
         scenario.id + " timing sample count does not match sampleRounds")
       require(
@@ -676,6 +684,10 @@ private[benchmark] object Eip0045BenchmarkSupport {
       field(builder, "expectedOutcome", scenario.expectedOutcome)
       builder.append(',')
       numberField(builder, "validationQueryCheckpoints", scenario.validationQueryCheckpoints.toLong)
+      builder.append(',')
+      field(builder, "validationBoundary", scenario.validationBoundary)
+      builder.append(',')
+      field(builder, "lastVerifierCheckpoint", scenario.lastVerifierCheckpoint)
       builder.append(',').append(quote("samplesNs")).append(':')
       renderLongArray(builder, scenario.samplesNs)
       builder.append(',').append(quote("statistics")).append(':').append('{')
