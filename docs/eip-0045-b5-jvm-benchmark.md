@@ -5,21 +5,26 @@ evidence used to calibrate the stock-profile verifier's fixed consensus charge.
 Full campaigns are opt-in. The runner is not itself a ScalaTest suite, while
 focused support tests exercise bounded zero-warmup, one-sample smoke runs.
 
-The harness loads the checked-in B1, B2, and B3 resources through the
+The benchmark loads the checked-in B1, B2, and B3 resources through the
 production profile-package loader and hard-binds the candidate profile ID. It
-then measures five preconstructed paths:
+also loads a checked-in po2-16 interoperability KAT from a separate source,
+derives its claim from the image ID and journal, and compares that result with
+the retained claim digest. It then measures six preconstructed scenarios:
 
 - a valid real RISC0 raw seal;
 - a wrong first transport-chunk length rejected before cryptographic work;
 - a canonical raw-seal mutation rejected by the terminal control allowlist;
 - a mutation in the final proof word rejected in FRI after reaching all 50 proof-query checkpoints;
 - a claim mismatch reached after all proof queries;
+- the independently sourced real raw seal accepted as a normal po2-16 lift.
 
-Each path is validated before timing. Warmup and sampling use a deterministic
+Each scenario is validated before timing. Warmup and sampling use a deterministic
 rotating round-robin order so no path permanently occupies one position. One
 sample is one complete `Risc0RawSealVerifier.verify` call. Profile loading,
-fixture construction, validation probes, JSON serialization, and summary
-calculation are outside the timed samples. Version 4 records the current benchmark thread's
+fixture construction, claim derivation, validation probes, JSON serialization,
+and summary calculation are outside the timed samples. Validation invokes every
+scenario before warmup, so a zero-warmup smoke is not a cold-start measurement.
+Version 4 records the current benchmark thread's
 allocated-byte delta around each invocation and process-wide garbage-collector
 count/time deltas across the complete sampling phase. It refuses to emit V4
 evidence when either JVM counter is unavailable or moves backwards.
@@ -115,8 +120,8 @@ publishing the raw vector.
 
 `Eip0045CampaignValidator` consumes a canonical `CampaignManifestV2` and the
 V4 evidence files named by that campaign. The manifest fixes the candidate
-profile, implementation revision, verifier entry point, seven resource
-identities, five scenarios, warmup and sample rounds, and every V4 format
+profile, implementation revision, verifier entry point, twelve resource
+identities, six scenarios, warmup and sample rounds, and every V4 format
 constant used by the producer. Revision identities use either
 `commit:` followed by 40 lowercase hexadecimal digits or `tree-sha256:`
 followed by a 64-digit lowercase digest.
@@ -134,6 +139,12 @@ replicate. Policy IDs, cell IDs, run IDs and replicate slots must be sorted,
 unique and fully referenced. Environment policy values, JVM count/digest
 identities and cell policy pairs must also be unique, so a run cannot resolve
 through two labels for the same policy.
+
+Resource identities describe the inputs loaded for the complete run. The
+association between one scenario and its fixture is fixed by the exact
+benchmark source; it is not encoded as a separate manifest field. The po2-16
+case replays checked-in KAT bytes from an independent source. This does not
+reproduce or attest the upstream receipt-generation process.
 
 For example, the first archive pass is:
 
@@ -207,8 +218,10 @@ It does not close B5 by itself, choose a `fixedJit`, measure node admission or
 ErgoTree preflight, control host scheduling or thermals, or replace the
 multi-host/repeated-operator campaign required before activation.
 
-The harness uses one po2-15 fixture. It does not cover the 11 positive profile
-cases, run a complete operation/allocation census, exercise the full
+The benchmark measures two real direct-verifier positives, po2-15 and po2-16.
+The po2-16 KAT uses a different guest and journal, so it is not one of the 11
+positive profile cases required by the conformance corpus. These two cases do
+not run a complete operation/allocation census, exercise the full
 Sigma/transaction path, measure dispatch, or attest the source build that
 produced the verifier bytes.
 
@@ -234,8 +247,8 @@ The repository retains one explicitly non-closing V1 timing-only local run in
 Microsoft OpenJDK 17.0.18, one 16-logical-processor Intel host, 15 rotating
 warmup rounds, and 100 samples per scenario.
 
-This older diagnostic predates the V4 five-path boundary contract. It has four
-scenarios and cannot be promoted to V4 campaign evidence.
+This older diagnostic predates the current V4 six-scenario boundary contract.
+It has four scenarios and cannot be promoted to V4 campaign evidence.
 
 | Scenario | Query checkpoints | p50 | p95 | p99 | maximum |
 |---|---:|---:|---:|---:|---:|

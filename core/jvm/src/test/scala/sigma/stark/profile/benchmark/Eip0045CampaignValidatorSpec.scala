@@ -5,6 +5,7 @@
  */
 package sigma.stark.profile.benchmark
 
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystemException, Files, Path}
 
@@ -16,6 +17,264 @@ import sigma.stark.profile.benchmark.Eip0045CampaignContract._
 import sigma.stark.profile.benchmark.Eip0045CampaignValidator._
 
 class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
+  test("V7 freezes schema versions, limitations, and the independent scenario append") {
+    Schema shouldBe "eip-0045-jvm-verifier-benchmark-v4"
+    ManifestSchema shouldBe "eip-0045-b5-campaign-manifest-v2"
+    ArchiveIndexSchema shouldBe "eip-0045-b5-campaign-archive-index-v1"
+    ExpectedCampaignLimitations.takeRight(4) shouldBe Vector(
+      "Resource identities cover the complete run; the scenario-to-fixture mapping is fixed by the exact benchmark source and is not encoded separately in the manifest.",
+      "The po2-16 case replays checked-in bytes from an independent source; it does not reproduce or attest their upstream generation.",
+      "Validation invokes every scenario before warmup, so zero warmup rounds are not a cold-start measurement.",
+      "Campaign mode parses the exact manifest bytes and matches the selected run, implementation revision, rounds, environment policy, and ordered JVM-input-argument identity before verifier setup.")
+
+    val v6Scenarios = Vector(
+      ScenarioPolicy(
+        "valid-proof", "verified:1:15", 50, "verification-complete", "query"),
+      ScenarioPolicy(
+        "early-transport-rejection",
+        "raw-seal-transport-rejected",
+        0,
+        "transport-chunk-shape",
+        "none"),
+      ScenarioPolicy(
+        "early-canonical-cryptographic-rejection",
+        "raw-seal-control-id-not-allowed",
+        0,
+        "terminal-control-allowlist",
+        "group_root_code"),
+      ScenarioPolicy(
+        "late-cryptographic-mutation",
+        "raw-seal-malformed-proof",
+        50,
+        "fri",
+        "query"),
+      ScenarioPolicy(
+        "late-claim-mismatch",
+        "raw-seal-claim-mismatch",
+        50,
+        "expected-claim-comparison",
+        "query"))
+
+    ExpectedScenarios.take(v6Scenarios.length) shouldBe v6Scenarios
+    ExpectedScenarios.drop(v6Scenarios.length) shouldBe Vector(
+      ScenarioPolicy(
+        "valid-independent-po2-16",
+        "verified:1:16",
+        50,
+        "verification-complete",
+        "query"))
+
+    val fixture = campaignFixture()
+    val index = ExpectedScenarios.length - 1
+    val scenario = ExpectedScenarios(index)
+    val mutations = Vector(
+      "id" -> ExpectedScenarios.updated(
+        index,
+        scenario.copy(id = "valid-independent-po2-15")),
+      "outcome" -> ExpectedScenarios.updated(
+        index,
+        scenario.copy(expectedOutcome = "verified:1:15")),
+      "query-count" -> ExpectedScenarios.updated(
+        index,
+        scenario.copy(validationQueryCheckpoints = 49)),
+      "boundary" -> ExpectedScenarios.updated(
+        index,
+        scenario.copy(validationBoundary = "fri")),
+      "checkpoint" -> ExpectedScenarios.updated(
+        index,
+        scenario.copy(lastVerifierCheckpoint = "group_root_code")),
+      "removal" -> ExpectedScenarios.dropRight(1),
+      "order" -> (scenario +: ExpectedScenarios.dropRight(1)))
+    mutations.foreach { case (label, changed) =>
+      withClue(label + ": ") {
+        renderManifest(fixture.manifest.copy(scenarios = changed)) shouldBe
+          Left("campaign scenarios do not match the frozen benchmark scenarios")
+      }
+    }
+
+    val first = fixture.payloads.head
+    val firstNewLimitation = ExpectedCampaignLimitations.length - 4
+    val changedLimitations = (0 until 3).map { offset =>
+      val index = firstNewLimitation + offset
+      "text-" + offset -> ExpectedCampaignLimitations.updated(
+        index,
+        ExpectedCampaignLimitations(index) + " changed")
+    }.toVector ++ Vector(
+      "removal" -> ExpectedCampaignLimitations.patch(firstNewLimitation, Nil, 1),
+      "order" -> ExpectedCampaignLimitations.updated(
+        firstNewLimitation,
+        ExpectedCampaignLimitations(firstNewLimitation + 1)).updated(
+        firstNewLimitation + 1,
+        ExpectedCampaignLimitations(firstNewLimitation)))
+    changedLimitations.foreach { case (label, changed) =>
+      withClue("limitation " + label + ": ") {
+        val payload = first.copy(limitations = changed)
+        validateArchiveBytes(
+          fixture.manifestBytes,
+          fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
+          Left("evidence limitations do not match campaign-mode V4")
+      }
+    }
+  }
+
+  test("V7 preserves the V6 resource prefix and appends five po2-16 identities") {
+    val v6Resources = Vector(
+      ResourceMetadata(
+        "profile-algorithm",
+        "classpath:/stark-kats/eip0045-profile-package/algorithm.txt",
+        29773,
+        "90a884da420a09f2c1108d7388c2ac74db8dbdb195de704206e2bf8ec1ad0bee"),
+      ResourceMetadata(
+        "profile-constants",
+        "classpath:/stark-kats/eip0045-profile-package/constants.bin",
+        65119,
+        "8c4a92b7d354890481eefdef233d4ca43f6bcd9f7cb00e4dd9e709da47789ef3"),
+      ResourceMetadata(
+        "profile-manifest",
+        "classpath:/stark-kats/eip0045-profile-package/manifest.bin",
+        458,
+        "deffb2cb231f98a348cbd166d5f1c43315661ccd8bd212099f16f238d0fe8946"),
+      ResourceMetadata(
+        "profile-id",
+        "classpath:/stark-kats/eip0045-profile-package/profile-id.bin",
+        32,
+        "aa144c74a0cb52b3c5a9827f10a264f320820190da14a9bf82dcf3466f41aae1"),
+      ResourceMetadata(
+        "raw-seal",
+        "classpath:/stark-kats/eip0045-direct/po2-15-raw-seal.bin",
+        222668,
+        "088e6a306c7143f5a3e057924c42f63a6eb58dd3c30686a8ade5082fac4b386e"),
+      ResourceMetadata(
+        "claim-digest",
+        "classpath:/stark-kats/eip0045-direct/po2-15-claim-digest.bin",
+        32,
+        "df9df2763693f97b85acd9d3cda4b13e2421b3dc052a6f91ab995c89ae75ee3c"),
+      ResourceMetadata(
+        "fixture-manifest",
+        "classpath:/stark-kats/eip0045-direct/fixture-manifest.json",
+        1559,
+        "7df5d428210065e9480b44d273db298b85c692e3eafbbe4db76fb00ba3bd84a3"))
+    val po2_16Resources = Vector(
+      ResourceMetadata(
+        "po2-16-raw-seal",
+        "classpath:/stark-kats/eip0045-arkadia-independent/raw-seal.bin",
+        222668,
+        "d7bdef7d0b3759a6d8ba43c9b531b017112b07e42af2761fbe654a596d759d79"),
+      ResourceMetadata(
+        "po2-16-claim-digest",
+        "classpath:/stark-kats/eip0045-arkadia-independent/claim-digest.bin",
+        32,
+        "e8b4b5217ae717e000f8fb3e36a510aeef5ed5c79d04f2c600b74997b5858cfc"),
+      ResourceMetadata(
+        "po2-16-image-id",
+        "classpath:/stark-kats/eip0045-arkadia-independent/image-id.bin",
+        32,
+        "0e3a24e2345c1d8e4c3ef2e769aeb3c15465df56d9355c377c4de54cec97fa69"),
+      ResourceMetadata(
+        "po2-16-journal",
+        "classpath:/stark-kats/eip0045-arkadia-independent/journal.bin",
+        67,
+        "be21ccbca9266d302b484d9a4dd01247f6d2cba5e4dc30474a7238f2033ba2e8"),
+      ResourceMetadata(
+        "po2-16-fixture-manifest",
+        "classpath:/stark-kats/eip0045-arkadia-independent/fixture-manifest.json",
+        1840,
+        "6d30977a0b13a18131688a133cac4dd977c3fd6d109f549e8ca5ac29395584b7"))
+
+    ExpectedResources.take(v6Resources.length) shouldBe v6Resources
+    ExpectedResources.drop(v6Resources.length) shouldBe po2_16Resources
+
+    val fixture = campaignFixture()
+    renderManifest(fixture.manifest.copy(resources = v6Resources)) shouldBe
+      Left("campaign resources do not match the frozen benchmark resources")
+    po2_16Resources.indices.foreach { offset =>
+      val index = v6Resources.length + offset
+      val resource = ExpectedResources(index)
+      val changedDigest = ExpectedResources.updated(
+        index,
+        resource.copy(sha256 = (if (resource.sha256.head == '0') "1" else "0") +
+          resource.sha256.substring(1)))
+      val changedId = ExpectedResources.updated(
+        index,
+        resource.copy(id = resource.id + "-changed"))
+      val changedSource = ExpectedResources.updated(
+        index,
+        resource.copy(classpath = resource.classpath + ".changed"))
+      val changedLength = ExpectedResources.updated(
+        index,
+        resource.copy(byteLength = resource.byteLength + 1))
+      val removed = ExpectedResources.patch(index, Nil, 1)
+      Vector(
+        "digest" -> changedDigest,
+        "id" -> changedId,
+        "source" -> changedSource,
+        "length" -> changedLength,
+        "removal" -> removed).foreach { case (label, changed) =>
+        withClue(resource.id + " " + label + ": ") {
+          renderManifest(fixture.manifest.copy(resources = changed)) shouldBe
+            Left("campaign resources do not match the frozen benchmark resources")
+          val payload = fixture.payloads.head.copy(resources = changed)
+          validateArchiveBytes(
+            fixture.manifestBytes,
+            fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
+            Left("evidence resources do not match the campaign")
+        }
+      }
+    }
+    val reordered = ExpectedResources.updated(7, ExpectedResources(8)).updated(
+      8,
+      ExpectedResources(7))
+    renderManifest(fixture.manifest.copy(resources = reordered)) shouldBe
+      Left("campaign resources do not match the frozen benchmark resources")
+    val reorderedPayload = fixture.payloads.head.copy(resources = reordered)
+    validateArchiveBytes(
+      fixture.manifestBytes,
+      fixture.evidence.updated(0, bytes(renderEnvelope(reorderedPayload)))) shouldBe
+      Left("evidence resources do not match the campaign")
+  }
+
+  test("independent image, journal, and retained claim jointly derive the po2-16 claim") {
+    val root = "/stark-kats/eip0045-arkadia-independent/"
+    val imageId = resourceBytes(root + "image-id.bin")
+    val journal = resourceBytes(root + "journal.bin")
+    val retainedClaim = resourceBytes(root + "claim-digest.bin")
+
+    val derived = rightValue(Eip0045VerifierBenchmark.deriveIndependentClaim(
+      imageId,
+      journal,
+      retainedClaim))
+    derived shouldBe retainedClaim
+    (derived eq retainedClaim) shouldBe false
+    Eip0045VerifierBenchmark.deriveIndependentClaim(
+      imageId.drop(1),
+      journal,
+      retainedClaim) shouldBe Left("independent claim inputs are invalid")
+
+    val changedImageId = imageId.clone()
+    changedImageId(0) = (changedImageId(0) ^ 1).toByte
+    Eip0045VerifierBenchmark.deriveIndependentClaim(
+      changedImageId,
+      journal,
+      retainedClaim) shouldBe
+      Left("independent claim does not match the retained claim resource")
+
+    val changedJournal = journal.clone()
+    changedJournal(0) = (changedJournal(0) ^ 1).toByte
+    Eip0045VerifierBenchmark.deriveIndependentClaim(
+      imageId,
+      changedJournal,
+      retainedClaim) shouldBe
+      Left("independent claim does not match the retained claim resource")
+
+    val changedClaim = retainedClaim.clone()
+    changedClaim(0) = (changedClaim(0) ^ 1).toByte
+    Eip0045VerifierBenchmark.deriveIndependentClaim(
+      imageId,
+      journal,
+      changedClaim) shouldBe
+      Left("independent claim does not match the retained claim resource")
+  }
+
   test("canonical two-cell four-run campaign validates and produces a path-free index") {
     val fixture = campaignFixture()
     val shuffled = Vector(
@@ -274,6 +533,50 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         0,
         scenario.copy(lastVerifierCheckpoint = "group_root_code"))),
       "order" -> first.copy(scenarios = first.scenarios.reverse))
+    mutations.foreach { case (label, payload) =>
+      withClue(label + ": ") {
+        validateArchiveBytes(
+          fixture.manifestBytes,
+          fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
+          Left("evidence scenarios do not match the campaign")
+      }
+    }
+  }
+
+  test("the independent po2-16 evidence row is matched field by field and in order") {
+    val fixture = campaignFixture()
+    val first = fixture.payloads.head
+    val scenarioIndex = first.scenarios.length - 1
+    val scenario = first.scenarios(scenarioIndex)
+    scenario shouldBe ScenarioEvidence(
+      "valid-independent-po2-16",
+      "verified:1:16",
+      50,
+      "verification-complete",
+      "query",
+      scenario.samplesNs,
+      scenario.statistics,
+      scenario.allocatedBytes,
+      scenario.allocationStatistics)
+
+    val mutations = Vector(
+      "id" -> first.copy(scenarios = first.scenarios.updated(
+        scenarioIndex,
+        scenario.copy(id = "valid-independent-po2-15"))),
+      "outcome" -> first.copy(scenarios = first.scenarios.updated(
+        scenarioIndex,
+        scenario.copy(expectedOutcome = "verified:1:15"))),
+      "query-count" -> first.copy(scenarios = first.scenarios.updated(
+        scenarioIndex,
+        scenario.copy(validationQueryCheckpoints = 49))),
+      "boundary" -> first.copy(scenarios = first.scenarios.updated(
+        scenarioIndex,
+        scenario.copy(validationBoundary = "fri"))),
+      "checkpoint" -> first.copy(scenarios = first.scenarios.updated(
+        scenarioIndex,
+        scenario.copy(lastVerifierCheckpoint = "group_root_code"))),
+      "removal" -> first.copy(scenarios = first.scenarios.dropRight(1)),
+      "order" -> first.copy(scenarios = scenario +: first.scenarios.dropRight(1)))
     mutations.foreach { case (label, payload) =>
       withClue(label + ": ") {
         validateArchiveBytes(
@@ -621,8 +924,21 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         "--output", evidencePath.toString))
 
       val evidenceBytes = Files.readAllBytes(evidencePath)
-      new String(evidenceBytes, StandardCharsets.UTF_8) should include(
+      val evidenceText = new String(evidenceBytes, StandardCharsets.UTF_8)
+      evidenceText should include(
         "\"campaignBinding\":{\"runId\":\"cell-current:r1\"")
+      evidenceText should include(
+        "\"id\":\"valid-independent-po2-16\",\"expectedOutcome\":\"verified:1:16\"," +
+          "\"validationQueryCheckpoints\":50,\"validationBoundary\":" +
+          "\"verification-complete\",\"lastVerifierCheckpoint\":\"query\"")
+      Vector(
+        "po2-16-raw-seal",
+        "po2-16-claim-digest",
+        "po2-16-image-id",
+        "po2-16-journal",
+        "po2-16-fixture-manifest").foreach { resourceId =>
+        evidenceText should include("\"id\":\"" + resourceId + "\"")
+      }
       val created = rightValue(validateFiles(
         manifestPath,
         Vector(evidencePath),
@@ -1154,6 +1470,24 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       quote("canonicalization") + ":" + quote(Canonicalization) + "," +
       quote("evidenceDigest") + ":" + quote(evidenceDigest(payloadJson)) + "," +
       quote("payload") + ":" + payloadJson + "}\n"
+  }
+
+  private def resourceBytes(path: String): Array[Byte] = {
+    val in = getClass.getResourceAsStream(path)
+    require(in != null, "missing test resource")
+    val out = new ByteArrayOutputStream()
+    val buffer = new Array[Byte](8192)
+    try {
+      var read = in.read(buffer)
+      while (read >= 0) {
+        if (read > 0) out.write(buffer, 0, read)
+        read = in.read(buffer)
+      }
+      out.toByteArray
+    } finally {
+      in.close()
+      out.close()
+    }
   }
 
   private def writeEvidence(directory: Path, fixture: Fixture): Vector[Path] =

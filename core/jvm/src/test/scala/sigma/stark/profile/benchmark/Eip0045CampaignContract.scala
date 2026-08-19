@@ -188,7 +188,32 @@ private[benchmark] object Eip0045CampaignContract {
       "fixture-manifest",
       "classpath:/stark-kats/eip0045-direct/fixture-manifest.json",
       1559,
-      "7df5d428210065e9480b44d273db298b85c692e3eafbbe4db76fb00ba3bd84a3"))
+      "7df5d428210065e9480b44d273db298b85c692e3eafbbe4db76fb00ba3bd84a3"),
+    ResourceMetadata(
+      "po2-16-raw-seal",
+      "classpath:/stark-kats/eip0045-arkadia-independent/raw-seal.bin",
+      222668,
+      "d7bdef7d0b3759a6d8ba43c9b531b017112b07e42af2761fbe654a596d759d79"),
+    ResourceMetadata(
+      "po2-16-claim-digest",
+      "classpath:/stark-kats/eip0045-arkadia-independent/claim-digest.bin",
+      32,
+      "e8b4b5217ae717e000f8fb3e36a510aeef5ed5c79d04f2c600b74997b5858cfc"),
+    ResourceMetadata(
+      "po2-16-image-id",
+      "classpath:/stark-kats/eip0045-arkadia-independent/image-id.bin",
+      32,
+      "0e3a24e2345c1d8e4c3ef2e769aeb3c15465df56d9355c377c4de54cec97fa69"),
+    ResourceMetadata(
+      "po2-16-journal",
+      "classpath:/stark-kats/eip0045-arkadia-independent/journal.bin",
+      67,
+      "be21ccbca9266d302b484d9a4dd01247f6d2cba5e4dc30474a7238f2033ba2e8"),
+    ResourceMetadata(
+      "po2-16-fixture-manifest",
+      "classpath:/stark-kats/eip0045-arkadia-independent/fixture-manifest.json",
+      1840,
+      "6d30977a0b13a18131688a133cac4dd977c3fd6d109f549e8ca5ac29395584b7"))
 
   val ExpectedScenarios: Vector[ScenarioPolicy] = Vector(
     ScenarioPolicy(
@@ -216,6 +241,12 @@ private[benchmark] object Eip0045CampaignContract {
       "raw-seal-claim-mismatch",
       50,
       "expected-claim-comparison",
+      "query"),
+    ScenarioPolicy(
+      "valid-independent-po2-16",
+      "verified:1:16",
+      50,
+      "verification-complete",
       "query"))
 
   val ExpectedCampaignLimitations: Vector[String] = Vector(
@@ -229,6 +260,9 @@ private[benchmark] object Eip0045CampaignContract {
     "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
     "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.",
     "Validation boundaries and last verifier checkpoints are probe-only observations; they are not operation counts, cost bounds, or timed-path measurements.",
+    "Resource identities cover the complete run; the scenario-to-fixture mapping is fixed by the exact benchmark source and is not encoded separately in the manifest.",
+    "The po2-16 case replays checked-in bytes from an independent source; it does not reproduce or attest their upstream generation.",
+    "Validation invokes every scenario before warmup, so zero warmup rounds are not a cold-start measurement.",
     "Campaign mode parses the exact manifest bytes and matches the selected run, implementation revision, rounds, environment policy, and ordered JVM-input-argument identity before verifier setup.")
 
   sealed trait JsonValue

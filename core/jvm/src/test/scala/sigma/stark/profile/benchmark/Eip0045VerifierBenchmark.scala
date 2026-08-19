@@ -12,7 +12,12 @@ import java.nio.file.{FileAlreadyExistsException, Files, Paths, StandardOpenOpti
 import java.time.Instant
 
 import sigma.stark.FriVerifier
-import sigma.stark.profile.{RawSealV1Decoder, Risc0ProfilePackageLoader, Risc0RawSealVerifier}
+import sigma.stark.profile.{
+  RawSealV1Decoder,
+  Risc0ClaimBuilder,
+  Risc0ProfilePackageLoader,
+  Risc0RawSealVerifier
+}
 import sigma.stark.profile.Risc0RawSealVerifier.{
   ClaimMismatch,
   ControlIdNotAllowed,
@@ -34,7 +39,7 @@ import scala.util.Properties
   * Full benchmark campaigns run explicitly with `coreJVM/Test/runMain`. The
   * object is not itself a ScalaTest suite; focused support tests call it only
   * for bounded zero-warmup, one-sample smoke runs. Each run authenticates the
-  * frozen B1/B2/B3 package through the production loader, validates all five
+  * frozen B1/B2/B3 package through the production loader, validates all six
   * scenario paths, warms them in a
   * rotating schedule, then records one complete verifier invocation per
   * sample. It never derives or recommends a consensus fixedJit value.
@@ -42,6 +47,7 @@ import scala.util.Properties
 object Eip0045VerifierBenchmark {
   private val PackageRoot = "/stark-kats/eip0045-profile-package/"
   private val DirectRoot = "/stark-kats/eip0045-direct/"
+  private val IndependentRoot = "/stark-kats/eip0045-arkadia-independent/"
   private val ExpectedProfileId =
     "23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383"
   private val ExpectedSealSha256 =
@@ -80,10 +86,14 @@ object Eip0045VerifierBenchmark {
       run: () => Either[Failure, Verified],
       runWithProbe: Probe => Either[Failure, Verified])
 
+  private final case class ProofFixture(
+      rawSeal: Array[Byte],
+      expectedClaim: Array[Byte])
+
   private final case class Fixture(
       verifier: Risc0RawSealVerifier,
-      rawSeal: Array[Byte],
-      expectedClaim: Array[Byte],
+      primary: ProofFixture,
+      independent: ProofFixture,
       resources: Vector[ResourceMetadata])
 
   private final case class Measurements(
@@ -304,6 +314,20 @@ object Eip0045VerifierBenchmark {
     System.err.println("wrote EIP-0045 benchmark evidence")
   }
 
+  private[benchmark] def deriveIndependentClaim(
+      imageId: Array[Byte],
+      journal: Array[Byte],
+      retainedClaim: Array[Byte]): Either[String, Array[Byte]] = {
+    Risc0ClaimBuilder.deriveOkClaimDigests(imageId, journal) match {
+      case Left(_) => Left("independent claim inputs are invalid")
+      case Right(value) =>
+        val derived = value.expectedClaim
+        if (!java.util.Arrays.equals(derived, retainedClaim))
+          Left("independent claim does not match the retained claim resource")
+        else Right(derived)
+    }
+  }
+
   private def loadFixture(observer: ExecutionObserver): Fixture = {
     observer.beforeVerifierSetup()
     val algorithm = resourceBytes(PackageRoot + "algorithm.txt")
@@ -313,6 +337,11 @@ object Eip0045VerifierBenchmark {
     val rawSeal = resourceBytes(DirectRoot + "po2-15-raw-seal.bin")
     val expectedClaim = resourceBytes(DirectRoot + "po2-15-claim-digest.bin")
     val fixtureManifest = resourceBytes(DirectRoot + "fixture-manifest.json")
+    val independentRawSeal = resourceBytes(IndependentRoot + "raw-seal.bin")
+    val independentRetainedClaim = resourceBytes(IndependentRoot + "claim-digest.bin")
+    val independentImageId = resourceBytes(IndependentRoot + "image-id.bin")
+    val independentJournal = resourceBytes(IndependentRoot + "journal.bin")
+    val independentManifest = resourceBytes(IndependentRoot + "fixture-manifest.json")
     val expectedProfileBytes = decodeHex(ExpectedProfileId)
 
     require(
@@ -325,6 +354,37 @@ object Eip0045VerifierBenchmark {
     require(
       ChunkLengths.sum == rawSeal.length,
       "canonical chunk partition does not cover the raw-seal fixture")
+
+    val resources = Vector(
+      metadata("profile-algorithm", PackageRoot + "algorithm.txt", algorithm),
+      metadata("profile-constants", PackageRoot + "constants.bin", constants),
+      metadata("profile-manifest", PackageRoot + "manifest.bin", manifest),
+      metadata("profile-id", PackageRoot + "profile-id.bin", profileIdResource),
+      metadata("raw-seal", DirectRoot + "po2-15-raw-seal.bin", rawSeal),
+      metadata("claim-digest", DirectRoot + "po2-15-claim-digest.bin", expectedClaim),
+      metadata("fixture-manifest", DirectRoot + "fixture-manifest.json", fixtureManifest),
+      metadata("po2-16-raw-seal", IndependentRoot + "raw-seal.bin", independentRawSeal),
+      metadata(
+        "po2-16-claim-digest",
+        IndependentRoot + "claim-digest.bin",
+        independentRetainedClaim),
+      metadata("po2-16-image-id", IndependentRoot + "image-id.bin", independentImageId),
+      metadata("po2-16-journal", IndependentRoot + "journal.bin", independentJournal),
+      metadata(
+        "po2-16-fixture-manifest",
+        IndependentRoot + "fixture-manifest.json",
+        independentManifest))
+    require(resources == ExpectedResources, "benchmark resource identities changed")
+    require(
+      independentRawSeal.length == RawSealV1Decoder.ByteCount,
+      "independent raw-seal fixture length changed")
+    val independentExpectedClaim = deriveIndependentClaim(
+      independentImageId,
+      independentJournal,
+      independentRetainedClaim) match {
+      case Right(value) => value
+      case Left(detail) => throw new IllegalStateException(detail)
+    }
 
     val loaded = Risc0ProfilePackageLoader.load(
       manifest,
@@ -339,28 +399,25 @@ object Eip0045VerifierBenchmark {
       java.util.Arrays.equals(loaded.profileId, expectedProfileBytes),
       "loaded profile identity changed")
 
-    val resources = Vector(
-      metadata("profile-algorithm", PackageRoot + "algorithm.txt", algorithm),
-      metadata("profile-constants", PackageRoot + "constants.bin", constants),
-      metadata("profile-manifest", PackageRoot + "manifest.bin", manifest),
-      metadata("profile-id", PackageRoot + "profile-id.bin", profileIdResource),
-      metadata("raw-seal", DirectRoot + "po2-15-raw-seal.bin", rawSeal),
-      metadata("claim-digest", DirectRoot + "po2-15-claim-digest.bin", expectedClaim),
-      metadata("fixture-manifest", DirectRoot + "fixture-manifest.json", fixtureManifest))
-    Fixture(loaded.verifier, rawSeal, expectedClaim, resources)
+    Fixture(
+      loaded.verifier,
+      ProofFixture(rawSeal, expectedClaim),
+      ProofFixture(independentRawSeal, independentExpectedClaim),
+      resources)
   }
 
   private def buildScenarios(fixture: Fixture): Vector[Scenario] = {
-    val validChunks = canonicalChunks(fixture.rawSeal)
-    val wrongClaim = fixture.expectedClaim.clone()
+    val validChunks = canonicalChunks(fixture.primary.rawSeal)
+    val independentValidChunks = canonicalChunks(fixture.independent.rawSeal)
+    val wrongClaim = fixture.primary.expectedClaim.clone()
     wrongClaim(0) = (wrongClaim(0) ^ 1).toByte
 
-    val lateMutation = fixture.rawSeal.clone()
+    val lateMutation = fixture.primary.rawSeal.clone()
     val mutationOffset = (RawSealV1Decoder.WordCount - 1) * 4
     lateMutation(mutationOffset) = (lateMutation(mutationOffset) ^ 1).toByte
     val lateMutationChunks = canonicalChunks(lateMutation)
 
-    val earlyCanonicalMutation = fixture.rawSeal.clone()
+    val earlyCanonicalMutation = fixture.primary.rawSeal.clone()
     earlyCanonicalMutation(132) = (earlyCanonicalMutation(132) ^ 1).toByte
     val earlyCanonicalMutationChunks = canonicalChunks(earlyCanonicalMutation)
     require(
@@ -368,10 +425,13 @@ object Eip0045VerifierBenchmark {
       "early cryptographic mutation is not a canonical raw seal")
 
     val earlyRejectedChunks = Array(
-      java.util.Arrays.copyOfRange(fixture.rawSeal, 0, 65534),
-      java.util.Arrays.copyOfRange(fixture.rawSeal, 65534, 131070),
-      java.util.Arrays.copyOfRange(fixture.rawSeal, 131070, 196605),
-      java.util.Arrays.copyOfRange(fixture.rawSeal, 196605, fixture.rawSeal.length))
+      java.util.Arrays.copyOfRange(fixture.primary.rawSeal, 0, 65534),
+      java.util.Arrays.copyOfRange(fixture.primary.rawSeal, 65534, 131070),
+      java.util.Arrays.copyOfRange(fixture.primary.rawSeal, 131070, 196605),
+      java.util.Arrays.copyOfRange(
+        fixture.primary.rawSeal,
+        196605,
+        fixture.primary.rawSeal.length))
 
     Vector(
       Scenario(
@@ -380,26 +440,31 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "verification-complete",
         "query",
-        () => fixture.verifier.verify(validChunks, fixture.expectedClaim),
-        probe => fixture.verifier.verify(validChunks, fixture.expectedClaim, probe)),
+        () => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim),
+        probe => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim, probe)),
       Scenario(
         "early-transport-rejection",
         "raw-seal-transport-rejected",
         0,
         "transport-chunk-shape",
         "none",
-        () => fixture.verifier.verify(earlyRejectedChunks, fixture.expectedClaim),
-        probe => fixture.verifier.verify(earlyRejectedChunks, fixture.expectedClaim, probe)),
+        () => fixture.verifier.verify(earlyRejectedChunks, fixture.primary.expectedClaim),
+        probe => fixture.verifier.verify(
+          earlyRejectedChunks,
+          fixture.primary.expectedClaim,
+          probe)),
       Scenario(
         "early-canonical-cryptographic-rejection",
         "raw-seal-control-id-not-allowed",
         0,
         "terminal-control-allowlist",
         "group_root_code",
-        () => fixture.verifier.verify(earlyCanonicalMutationChunks, fixture.expectedClaim),
+        () => fixture.verifier.verify(
+          earlyCanonicalMutationChunks,
+          fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           earlyCanonicalMutationChunks,
-          fixture.expectedClaim,
+          fixture.primary.expectedClaim,
           probe)),
       Scenario(
         "late-cryptographic-mutation",
@@ -407,8 +472,11 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "fri",
         "query",
-        () => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim),
-        probe => fixture.verifier.verify(lateMutationChunks, fixture.expectedClaim, probe)),
+        () => fixture.verifier.verify(lateMutationChunks, fixture.primary.expectedClaim),
+        probe => fixture.verifier.verify(
+          lateMutationChunks,
+          fixture.primary.expectedClaim,
+          probe)),
       Scenario(
         "late-claim-mismatch",
         "raw-seal-claim-mismatch",
@@ -416,7 +484,20 @@ object Eip0045VerifierBenchmark {
         "expected-claim-comparison",
         "query",
         () => fixture.verifier.verify(validChunks, wrongClaim),
-        probe => fixture.verifier.verify(validChunks, wrongClaim, probe)))
+        probe => fixture.verifier.verify(validChunks, wrongClaim, probe)),
+      Scenario(
+        "valid-independent-po2-16",
+        "verified:1:16",
+        FriVerifier.Queries,
+        "verification-complete",
+        "query",
+        () => fixture.verifier.verify(
+          independentValidChunks,
+          fixture.independent.expectedClaim),
+        probe => fixture.verifier.verify(
+          independentValidChunks,
+          fixture.independent.expectedClaim,
+          probe)))
   }
 
   private def validateScenario(scenario: Scenario): ValidationResult = {
