@@ -68,7 +68,7 @@ class Risc0SourceMapSpec extends AnyFunSuite with Matchers {
       sourceMapText.substring(filesStart, evidenceStart)).map { m =>
       m.group(1) -> m.group(2)
     }.toSeq
-    entries should have size 17
+    entries should have size 18
     entries.map(_._1).distinct should have size entries.size
 
     val actualPaths = productionScalaFiles(StarkSourceRoot)

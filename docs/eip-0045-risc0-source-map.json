@@ -203,7 +203,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/Poseidon2.scala",
-      "sha256": "56f1638bac10d7be183d2ebff9f3d844f20a036abc10814e2a933eb851d3c198",
+      "sha256": "0ed59a50f0d766bbc6afe55705f9187ea1c773a7a0e90adc5b3624ab5490f79c",
       "provenance": "adapted",
       "sources": [
         "arkadia:Poseidon2",
@@ -212,7 +212,8 @@
       "transformations": [
         "Translated the width-24 BabyBear permutation and sponge boundary operations to Scala.",
         "Specialized all generic hash-suite and field traits to the fixed stock profile.",
-        "Added explicit length and canonical-value rejection."
+        "Added explicit length and canonical-value rejection.",
+        "Added package-bounded validation-only callbacks after successful content-hash calls and permutations without storing observer state."
       ]
     },
     {
@@ -231,7 +232,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/Poseidon2Rng.scala",
-      "sha256": "83d8e13ba58dae39d4ea49f4793a1c4a7fdd55b952314c25ac71ab11f7e29360",
+      "sha256": "77a8dff8acfe825acaa4fcbd12a72c4eef087da708579fe47b896dc51eac3df3",
       "provenance": "adapted",
       "sources": [
         "arkadia:Poseidon2Rng",
@@ -240,12 +241,13 @@
       "transformations": [
         "Translated the fixed Poseidon2 Fiat-Shamir sponge to Scala.",
         "Preserved four-draw randomBits behavior and raw-digest absorption.",
-        "Added defensive cloning/validation at public boundaries."
+        "Added defensive cloning/validation at public boundaries.",
+        "Added package-bounded validation-only callbacks after successful transcript commits, element draws, and permutations without storing observer state."
       ]
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/ReadIop.scala",
-      "sha256": "089db2454da6ebac54b6a9785f9ebb91291706f1b406a84d157705f1d590d9d7",
+      "sha256": "cffda5b6fbf10d5f217463ea9a00485c4793389ca78861b2ad1c63eef2863de1",
       "provenance": "adapted",
       "sources": [
         "arkadia:ReadIop",
@@ -254,12 +256,24 @@
       "transformations": [
         "Specialized ReadIOP to an in-memory fixed-profile word stream.",
         "Converted upstream panic/error paths into Option-returning total reads.",
-        "Made raw-versus-canonical Montgomery conversions and strict EOF explicit."
+        "Made raw-versus-canonical Montgomery conversions and strict EOF explicit.",
+        "Forwarded a package-bounded validation-only operation sink through transcript primitives without retaining it in ReadIOP state."
+      ]
+    },
+    {
+      "path": "core/shared/src/main/scala/sigma/stark/VerifierOperationObserver.scala",
+      "sha256": "cb26510f1175552d3414e1a1408e8c272442f4710d0c8ff4e6b9f4ca2cded481",
+      "provenance": "original",
+      "sources": [],
+      "transformations": [
+        "Original EIP-0045 validation-only operation observer by A. Shannon.",
+        "Uses package-bounded integer event IDs without proof payloads, stored state, thread-local state, or public API exposure.",
+        "Defines a null no-probe sink so production verifier overloads retain their historical path."
       ]
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/MerkleVerifier.scala",
-      "sha256": "dce2eda85266608b0ba0dccf5571c6577e44bae16f84e479d4ed8b71c580d7c9",
+      "sha256": "1f589f148bff38861a9cc9a519771c5fdee643974f24090a066b4f1a88df1e6a",
       "provenance": "adapted",
       "sources": [
         "arkadia:MerkleVerifier",
@@ -269,12 +283,13 @@
       "transformations": [
         "Translated the fixed Poseidon2 Merkle verifier and tree-parameter calculation to Scala.",
         "Specialized generics to eight-word digests and BabyBear rows.",
-        "Added typed/total proof rejection and explicit raw/canonical digest boundaries."
+        "Added typed/total proof rejection and explicit raw/canonical digest boundaries.",
+        "Added package-bounded validation-only callbacks after successful top-tree and query-path pair hashes without retaining observer state."
       ]
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/FriVerifier.scala",
-      "sha256": "8adbdf0f80798e3628b3dbe34f089c8aba56d21b7e51cf53f4c512f45fb5c96c",
+      "sha256": "048b42cc265d19d26d4d1e2c75099852651a270cdfae4b63a779bbbe8a5d828e",
       "provenance": "adapted",
       "sources": [
         "arkadia:FriVerifier",
@@ -286,7 +301,8 @@
       "transformations": [
         "Translated stock-profile FRI verification, 16-point inverse NTT, bit reversal, and roots of unity to Scala.",
         "Specialized queries, rate, fold size, and minimum degree to fixed profile parameters.",
-        "Replaced proof-dependent panics with total rejection and bounded allocations."
+        "Replaced proof-dependent panics with total rejection and bounded allocations.",
+        "Threaded the package-bounded validation-only operation sink through FRI transcript, Merkle, and content-hash calls without storing it in round state."
       ]
     },
     {
@@ -395,7 +411,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/Risc0RawSealVerifier.scala",
-      "sha256": "52b06c11223f9176965330073d66c117f0848fc011878606de839e18bff4ff23",
+      "sha256": "8679cdd42339fabb6860320fc8ff77bbb37f9170244505fc3d32ae21a4968f63",
       "provenance": "substantially-adapted",
       "sources": [
         "arkadia:SuccinctVerifier",
@@ -411,7 +427,8 @@
         "Retained the stock RISC0 STARK/DEEP-ALI/FRI verification flow from the independent Scala implementation and pinned RISC0 algorithms.",
         "Removed bincode receipt parsing, host receipt wrappers, caller-selected control programs, and generic control-set inclusion.",
         "Added direct fixed raw-seal input, manifest-owned exact control-ID matching, derived segment exponent, late inner-root/claim checks, strict EOF, immutable validated profile snapshots, exact TapSet coverage/distinctness checks, canonical PolyExt constants, fixed circuit/opcode censuses, and typed proof rejection.",
-        "Kept profile construction faults distinct from proof-controlled failures, routes the owned validated constraint-program snapshot through the sole PolyExt arithmetic kernel, and exposed only bounded checkpoint instrumentation."
+        "Kept profile construction faults distinct from proof-controlled failures, routes the owned validated constraint-program snapshot through the sole PolyExt arithmetic kernel, and exposed only bounded checkpoint instrumentation.",
+        "Routes the validation probe's package-bounded operation sink through direct-verifier primitives while the production no-probe path supplies null and retains no observer state."
       ]
     }
   ],
