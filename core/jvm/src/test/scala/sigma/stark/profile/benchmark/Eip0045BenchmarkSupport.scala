@@ -15,12 +15,12 @@ import java.security.MessageDigest
   * explicitly exercises it.
   */
 private[benchmark] object Eip0045BenchmarkSupport {
-  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v4"
+  final val Schema: String = "eip-0045-jvm-verifier-benchmark-v5"
   final val DigestAlgorithm: String = "SHA-256"
-  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v4"
+  final val DigestDomain: String = "Ergo.EIP0045.B5.Evidence.v5"
   final val JvmInputArgumentsDigestDomain: String =
     "Ergo.EIP0045.B5.JvmInputArguments.v1"
-  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v4"
+  final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v5"
   final val DefaultWarmupRounds: Int = 15
   final val DefaultSampleRounds: Int = 100
   final val MaxWarmupRounds: Int = 10000
@@ -30,6 +30,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
   final val MaxJvmInputArguments: Int = 1024
   final val MaxJvmInputArgumentBytes: Int = 64 * 1024
   final val MaxJvmInputArgumentsTotalBytes: Int = 1024 * 1024
+  final val MaxMemoryPools: Int = 256
 
   final case class Config(
       warmupRounds: Int,
@@ -46,6 +47,21 @@ private[benchmark] object Eip0045BenchmarkSupport {
       byteLength: Int,
       sha256: String)
 
+  final case class MemoryPoolIdentity(
+      name: String,
+      memoryType: String)
+
+  final case class MemoryUsageEvidence(
+      usedBytes: Long,
+      committedBytes: Long,
+      maxBytes: Long)
+
+  final case class MemoryPoolPhaseEnvelope(
+      identity: MemoryPoolIdentity,
+      afterResetPeakUsage: MemoryUsageEvidence,
+      endUsage: MemoryUsageEvidence,
+      finalPeakUsage: MemoryUsageEvidence)
+
   final case class EnvironmentMetadata(
       javaRuntimeName: String,
       javaRuntimeVersion: String,
@@ -61,6 +77,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
       maxHeapBytes: Long,
       jitCompiler: String,
       garbageCollectors: Vector[String],
+      memoryPoolIdentities: Vector[MemoryPoolIdentity],
       threadAllocationMeter: String,
       jvmInputArgumentCount: Int,
       jvmInputArgumentsSha256: String,
@@ -124,6 +141,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
       environment: EnvironmentMetadata,
       scenarios: Vector[ScenarioEvidence],
       garbageCollectorDeltas: Vector[GarbageCollectorDelta],
+      memoryPoolPhaseEnvelopes: Vector[MemoryPoolPhaseEnvelope],
       limitations: Vector[String])
 
   val Usage: String =
@@ -499,6 +517,92 @@ private[benchmark] object Eip0045BenchmarkSupport {
     Right(out.result())
   }
 
+  private[benchmark] def sortMemoryPoolIdentities(
+      identities: Vector[MemoryPoolIdentity]): Vector[MemoryPoolIdentity] =
+    identities.sortBy(identity => (identity.name, identity.memoryType))
+
+  def validateMemoryPoolIdentities(
+      identities: Vector[MemoryPoolIdentity]): Either[String, Unit] = {
+    if (identities == null) return Left("memory pool identities are null")
+    if (identities.isEmpty) return Left("memory pool identities are empty")
+    if (identities.length > MaxMemoryPools)
+      return Left("memory pool identity count exceeds " + MaxMemoryPools)
+    if (identities.exists(_ == null)) return Left("memory pool identities contain null")
+    var i = 0
+    while (i < identities.length) {
+      val identity = identities(i)
+      if (identity.name == null || identity.name.isEmpty ||
+          identity.name.length > 4096 || identity.name.exists(Character.isISOControl))
+        return Left("memory pool identity name is invalid")
+      strictUtf8(identity.name) match {
+        case Left(_) => return Left("memory pool identity name is invalid")
+        case Right(_) =>
+      }
+      if (identity.memoryType != "HEAP" && identity.memoryType != "NON_HEAP")
+        return Left("memory pool identity type is invalid")
+      i += 1
+    }
+    if (identities.distinct.length != identities.length)
+      return Left("memory pool identities contain duplicates")
+    if (identities != sortMemoryPoolIdentities(identities))
+      return Left("memory pool identities are not sorted")
+    Right(())
+  }
+
+  def validateMemoryUsageEvidence(
+      usage: MemoryUsageEvidence,
+      label: String): Either[String, Unit] = {
+    if (usage == null) return Left(label + " is null")
+    if (usage.usedBytes < 0L) return Left(label + " used bytes are negative")
+    if (usage.committedBytes < 0L) return Left(label + " committed bytes are negative")
+    if (usage.maxBytes < -1L) return Left(label + " maximum bytes are invalid")
+    if (usage.usedBytes > usage.committedBytes)
+      return Left(label + " used bytes exceed committed bytes")
+    if (usage.maxBytes >= 0L && usage.committedBytes > usage.maxBytes)
+      return Left(label + " committed bytes exceed maximum bytes")
+    Right(())
+  }
+
+  def validateMemoryPoolPhaseEnvelopes(
+      identities: Vector[MemoryPoolIdentity],
+      envelopes: Vector[MemoryPoolPhaseEnvelope]): Either[String, Unit] = {
+    validateMemoryPoolIdentities(identities) match {
+      case Left(detail) => return Left(detail)
+      case Right(_) =>
+    }
+    if (envelopes == null) return Left("memory pool phase envelopes are null")
+    if (envelopes.isEmpty) return Left("memory pool phase envelopes are empty")
+    if (envelopes.exists(_ == null))
+      return Left("memory pool phase envelopes contain null")
+    if (envelopes.map(_.identity) != identities)
+      return Left("memory pool phase envelope identities do not match the environment")
+    var i = 0
+    while (i < envelopes.length) {
+      val envelope = envelopes(i)
+      val prefix = "memory pool " + envelope.identity.name
+      validateMemoryUsageEvidence(
+        envelope.afterResetPeakUsage,
+        prefix + " after-reset peak usage") match {
+        case Left(detail) => return Left(detail)
+        case Right(_) =>
+      }
+      validateMemoryUsageEvidence(envelope.endUsage, prefix + " end usage") match {
+        case Left(detail) => return Left(detail)
+        case Right(_) =>
+      }
+      validateMemoryUsageEvidence(envelope.finalPeakUsage, prefix + " final peak usage") match {
+        case Left(detail) => return Left(detail)
+        case Right(_) =>
+      }
+      if (envelope.finalPeakUsage.usedBytes < envelope.afterResetPeakUsage.usedBytes)
+        return Left(prefix + " final peak used bytes are below after-reset peak used bytes")
+      if (envelope.finalPeakUsage.usedBytes < envelope.endUsage.usedBytes)
+        return Left(prefix + " final peak used bytes are below end used bytes")
+      i += 1
+    }
+    Right(())
+  }
+
   private def validatedSamples(
       samples: Seq[Long],
       label: String): Either[String, Seq[Long]] = {
@@ -554,6 +658,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
     require(payload.environment != null, "environment is null")
     require(payload.scenarios != null, "scenarios are null")
     require(payload.garbageCollectorDeltas != null, "garbageCollectorDeltas is null")
+    require(payload.memoryPoolPhaseEnvelopes != null,
+      "memoryPoolPhaseEnvelopes is null")
     require(payload.scenarios.nonEmpty, "scenarios are empty")
     validateImplementationRevision(payload.implementationRevision) match {
       case Left(detail) =>
@@ -581,6 +687,12 @@ private[benchmark] object Eip0045BenchmarkSupport {
       "JVM input argument count is invalid")
     require(isLowerHexSha256(payload.environment.jvmInputArgumentsSha256),
       "JVM input arguments SHA-256 is invalid")
+    validateMemoryPoolPhaseEnvelopes(
+      payload.environment.memoryPoolIdentities,
+      payload.memoryPoolPhaseEnvelopes) match {
+      case Left(detail) => throw new IllegalArgumentException("requirement failed: " + detail)
+      case Right(_) =>
+    }
     require(
       payload.scenarios.forall(item => item != null && item.id != null && item.id.nonEmpty),
       "scenarios contain an invalid entry")
@@ -673,6 +785,11 @@ private[benchmark] object Eip0045BenchmarkSupport {
     field(out, "allocationScope", "current benchmark thread around each timed verifier invocation")
     out.append(',')
     field(out, "garbageCollectionScope", "process-wide collector deltas across the complete sampling phase")
+    out.append(',')
+    field(
+      out,
+      "memoryPoolScope",
+      "sequential per-pool MemoryPoolMXBean.resetPeakUsage/getPeakUsage/getUsage boundary calls around the complete sampling phase; runner and JVM-management overhead included")
     out.append('}')
     out.append(',').append(quote("environment")).append(':')
     renderEnvironment(out, payload.environment)
@@ -725,6 +842,19 @@ private[benchmark] object Eip0045BenchmarkSupport {
       numberField(builder, "collectionTimeMs", collector.collectionTimeMs)
       builder.append('}')
     }
+    out.append(',').append(quote("memoryPoolPhaseEnvelopes")).append(':')
+    renderArray(out, payload.memoryPoolPhaseEnvelopes) { (builder, envelope) =>
+      builder.append('{')
+      builder.append(quote("identity")).append(':')
+      renderMemoryPoolIdentity(builder, envelope.identity)
+      builder.append(',').append(quote("afterResetPeakUsage")).append(':')
+      renderMemoryUsage(builder, envelope.afterResetPeakUsage)
+      builder.append(',').append(quote("endUsage")).append(':')
+      renderMemoryUsage(builder, envelope.endUsage)
+      builder.append(',').append(quote("finalPeakUsage")).append(':')
+      renderMemoryUsage(builder, envelope.finalPeakUsage)
+      builder.append('}')
+    }
     out.append(',').append(quote("limitations")).append(':')
     renderStringArray(out, payload.limitations)
     out.append('}')
@@ -760,6 +890,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
     field(out, "jitCompiler", environment.jitCompiler)
     out.append(',').append(quote("garbageCollectors")).append(':')
     renderStringArray(out, environment.garbageCollectors)
+    out.append(',').append(quote("memoryPoolIdentities")).append(':')
+    renderArray(out, environment.memoryPoolIdentities)(renderMemoryPoolIdentity)
     out.append(',')
     field(out, "threadAllocationMeter", environment.threadAllocationMeter)
     out.append(',')
@@ -770,6 +902,28 @@ private[benchmark] object Eip0045BenchmarkSupport {
     field(out, "cpuModel", environment.cpuModel)
     out.append(',')
     field(out, "cpuModelSource", environment.cpuModelSource)
+    out.append('}')
+  }
+
+  private def renderMemoryPoolIdentity(
+      out: StringBuilder,
+      identity: MemoryPoolIdentity): Unit = {
+    out.append('{')
+    field(out, "name", identity.name)
+    out.append(',')
+    field(out, "memoryType", identity.memoryType)
+    out.append('}')
+  }
+
+  private def renderMemoryUsage(
+      out: StringBuilder,
+      usage: MemoryUsageEvidence): Unit = {
+    out.append('{')
+    numberField(out, "usedBytes", usage.usedBytes)
+    out.append(',')
+    numberField(out, "committedBytes", usage.committedBytes)
+    out.append(',')
+    numberField(out, "maxBytes", usage.maxBytes)
     out.append('}')
   }
 

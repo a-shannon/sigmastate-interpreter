@@ -24,23 +24,34 @@ sample is one complete `Risc0RawSealVerifier.verify` call. Profile loading,
 fixture construction, claim derivation, validation probes, JSON serialization,
 and summary calculation are outside the timed samples. Validation invokes every
 scenario before warmup, so a zero-warmup smoke is not a cold-start measurement.
-Version 4 records the current benchmark thread's
+Version 5 records the current benchmark thread's
 allocated-byte delta around each invocation and process-wide garbage-collector
-count/time deltas across the complete sampling phase. It refuses to emit V4
-evidence when either JVM counter is unavailable or moves backwards.
+count/time deltas across the complete sampling phase. It also records a
+per-pool `MemoryPoolMXBean` phase envelope. After validation and warmup, the
+runner checks the ordered pool topology, resets each retained pool handle's
+peak tracker, reads `afterResetPeakUsage`, runs the GC-bracketed sample loop,
+then reads `endUsage`, `finalPeakUsage` and the final topology. It refuses to
+emit V5 evidence when a required counter, pool, reset or snapshot is
+unavailable or invalid. The canonical `memoryPoolScope` names the sequential
+per-pool `MemoryPoolMXBean.resetPeakUsage()`, `getPeakUsage()` and `getUsage()`
+boundary calls. Runner and JVM-management overhead inside those boundaries is
+part of the phase envelope, even though it is outside each timed verifier call.
 
-V4 can also run under a declared campaign policy. The producer takes one
+V5 can also run under a declared campaign policy. The producer takes one
 defensive copy of the manifest bytes, parses that copy and computes its length
 and SHA-256. It then resolves run to cell to environment/JVM policy. Revision,
-warmup rounds, sample rounds, the 17 environment fields and the JVM argument
-count/digest must all match before the profile fixture is loaded or the
-verifier is called. The envelope retains the manifest identity and public run
-ID, never the local manifest path or raw JVM arguments.
+warmup rounds, sample rounds, environment fields, ordered collector names,
+ordered memory-pool identities and the JVM argument count/digest must all match
+before the profile fixture is loaded or the verifier is called. The envelope
+retains the manifest identity and public run ID, never the local manifest path
+or raw JVM arguments.
 
 ## Recommended invocation
 
 Use a fresh forked JVM, an otherwise idle host, and the final release JDK and
-node JVM settings intended for the reference measurement. For example:
+node JVM settings intended for the reference measurement. No other benchmark,
+monitoring agent or JMX client may call `resetPeakUsage()` during the run. For
+example:
 
 ```text
 sbt -batch "project coreJVM" "set Test / fork := true" "Test / runMain sigma.stark.profile.benchmark.Eip0045VerifierBenchmark --warmup-rounds 15 --sample-rounds 100 --implementation-revision REVISION_OR_TREE_DIGEST --cpu-model CPU_MODEL --campaign-manifest CAMPAIGN_MANIFEST --campaign-run-id RUN_ID --output target/eip0045-b5-evidence.json"
@@ -54,10 +65,10 @@ manifest must be nonempty and at most 1,048,576 bytes. Its path is used only to
 read the bytes and is not written to the evidence.
 An accepted campaign run must replace the default `unrecorded` implementation
 revision with the exact public commit or a reviewed source-tree digest; this
-field is intentionally declarative because the harness does not shell out to
+field is intentionally declarative because the runner does not shell out to
 Git or depend on a particular checkout layout.
 
-Campaign mode is fail-closed. The harness parses the canonical manifest,
+Campaign mode is fail-closed. The runner parses the canonical manifest,
 requires the run ID to be declared, selects that run's cell and checks the
 observed process against its policy before verifier setup. There is no fallback
 from a rejected campaign run to diagnostic mode. Omitting both campaign options
@@ -73,6 +84,7 @@ The output is canonical, single-line UTF-8 JSON containing:
 - the profile ID, implementation revision, and timed verifier entry point;
 - optional campaign-manifest byte length/digest and public run ID;
 - JVM, operating-system, CPU, core-count, heap, JIT, and GC metadata;
+- the sorted `(name, memoryType)` identity of every observed JVM memory pool;
 - the ordered JVM input-argument count and domain-separated digest, without the
   raw argument strings;
 - every raw nanosecond sample plus nearest-rank p50, p95, p99, and maximum;
@@ -80,25 +92,27 @@ The output is canonical, single-line UTF-8 JSON containing:
 - the validation-only boundary and last verifier checkpoint for each scenario;
 - process-wide collection-count and collection-time deltas for every reported
   garbage collector during the sampling phase;
+- each pool's after-reset peak, end usage and final peak snapshots, with raw
+  `usedBytes`, `committedBytes` and `maxBytes` values;
 - the benchmark method and explicit scope limitations.
 
-The V4 `evidenceDigest` is:
+The V5 `evidenceDigest` is:
 
 ```text
-SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v4") || 0x00 || UTF8(payload))
+SHA-256(ASCII("Ergo.EIP0045.B5.Evidence.v5") || 0x00 || UTF8(payload))
 ```
 
 Here `payload` is the exact compact JSON object stored in the top-level
 `payload` field. The top-level `canonicalization` value identifies the fixed
 field-order, no-whitespace encoding used by this version. Raw samples are kept
 so reviewers can independently recompute every percentile. This digest binds
-the exact payload bytes under the fixed V4 domain. Consumers must independently
+the exact payload bytes under the fixed V5 domain. Consumers must independently
 require the exact top-level `schema`, `digestAlgorithm`, `digestDomain`, and
 `canonicalization` values. Whole-file identity requires a separate full-file
 hash. The evidence digest is not an operator signature or proof that a claimed
 run actually occurred.
 
-For JVM input arguments, V4 retains the separate ASCII domain
+For JVM input arguments, V5 retains the separate ASCII domain
 `Ergo.EIP0045.B5.JvmInputArguments.v1`, a zero byte, the unsigned 32-bit
 big-endian argument count, then each strict UTF-8 argument prefixed by its
 unsigned 32-bit big-endian byte length. Reordering arguments or moving bytes
@@ -118,21 +132,22 @@ publishing the raw vector.
 
 ## Campaign manifest and archive validation
 
-`Eip0045CampaignValidator` consumes a canonical `CampaignManifestV2` and the
-V4 evidence files named by that campaign. The manifest fixes the candidate
+`Eip0045CampaignValidator` consumes a canonical `CampaignManifestV3` and the
+V5 evidence files named by that campaign. The manifest fixes the candidate
 profile, implementation revision, verifier entry point, twelve resource
-identities, six scenarios, warmup and sample rounds, and every V4 format
+identities, six scenarios, warmup and sample rounds, and every V5 format
 constant used by the producer. Revision identities use either
 `commit:` followed by 40 lowercase hexadecimal digits or `tree-sha256:`
 followed by a 64-digit lowercase digest.
 
-The manifest V2 and archive-index V1 canonicalization identifiers say exactly
+The manifest V3 and archive-index V1 canonicalization identifiers say exactly
 what the encoders write: fixed field order, no whitespace between JSON tokens,
 and one terminal LF byte. The LF is part of the file identity.
 
 The matrix is explicit. A public environment policy records the JVM, OS, CPU,
-heap, JIT, collector names and allocation-counter implementation expected for
-one host class. A separate JVM-argument policy records only the ordered
+heap, JIT, collector names, ordered memory-pool identities and
+allocation-counter implementation expected for one host class. A separate
+JVM-argument policy records only the ordered
 argument count and domain-separated digest. Cells pair those two policies and
 declare a bounded replicate count; runs assign one public run ID to each
 replicate. Policy IDs, cell IDs, run IDs and replicate slots must be sorted,
@@ -152,7 +167,7 @@ For example, the first archive pass is:
 sbt -batch "project coreJVM" "Test / runMain sigma.stark.profile.benchmark.Eip0045CampaignValidator --manifest CAMPAIGN_MANIFEST --evidence RUN_1_JSON --evidence RUN_2_JSON --output ARCHIVE_INDEX"
 ```
 
-The validator reads only bounded regular files. It requires exactly one V4
+The validator reads only bounded regular files. It requires exactly one V5
 evidence file for every declared run, recomputes the payload digest and sample
 summaries, checks collector metadata, and compares all campaign-bound fields
 with the selected cell. Producer and validator call the same pure run-policy
@@ -191,10 +206,10 @@ directory entries.
 
 The resulting index is deterministic and contains no local paths. Entries are
 sorted by run ID and bind each complete evidence file by byte length and
-SHA-256, alongside its V4 payload digest. Preserve that index as a reviewed
+SHA-256, alongside its V5 payload digest. Preserve that index as a reviewed
 campaign artifact. A later replay can supply it with `--expected-index`; this
 detects changes even when someone has coordinated new raw samples, summaries,
-collector deltas and a matching V4 payload digest.
+collector deltas, memory-pool snapshots and a matching V5 payload digest.
 
 Canonical JSON and full-file hashes provide content identity. They do not
 authenticate an operator, prove host isolation, establish that a measurement
@@ -212,7 +227,17 @@ transport parsing, an early canonical cryptographic rejection, FRI rejection
 and the final claim comparison. It can contribute to cost calibration.
 Its allocation samples are JVM-reported approximations of Java-heap allocation
 charged to the benchmark thread for each path, while its GC deltas show whether
-the complete sampling phase coincided with collector work.
+the complete sampling phase coincided with collector work. The memory-pool
+records show each MXBean's reported high-water `usedBytes` value after the runner
+reset and its usage at the end of that same phase.
+
+The runner validates each memory snapshot on its own. `usedBytes` and
+`committedBytes` must be non-negative, `usedBytes` cannot exceed
+`committedBytes`, and a declared `maxBytes` cannot be below `committedBytes`;
+`maxBytes = -1` remains valid. Across phases, only the reported final peak's
+`usedBytes` value must cover both the after-reset peak and end usage.
+`committedBytes` and `maxBytes` may change. Pool values are kept separate and
+are never summed.
 
 It does not close B5 by itself, choose a `fixedJit`, measure node admission or
 ErgoTree preflight, control host scheduling or thermals, or replace the
@@ -230,10 +255,20 @@ show that a particular JVM invocation occurred. The archive validator checks
 the resulting files; it does not turn their content bindings into execution
 attestation.
 
-It does not measure native or other-thread allocations, peak live memory, a
-scenario-specific GC pause, or the complete GC/resource envelope. Those remain
-separate B5 obligations. The current-thread counter and process-wide GC deltas
-are observations, not memory-safety or concurrency bounds.
+It does not measure native or other-thread allocations, object liveness, a
+scenario-specific GC pause or the complete GC/resource envelope. A pool peak
+cannot be attributed to one scenario, and these records do not bound a node
+process. The current-thread counter, GC deltas and pool snapshots are
+observations, not memory-safety or concurrency bounds.
+
+Topology is checked at three boundaries: before campaign policy resolution,
+immediately before the reset and after the final peak read. The runner does not
+watch topology continuously. A private lock serializes runs through this loaded
+runner instance, but it cannot stop an external JMX client, Java agent or
+unrelated code from resetting peaks. Campaign evidence therefore requires an
+isolated fork with no concurrent peak resetter. A transient topology change or
+an external reset that leaves the final `usedBytes` inequalities intact can go
+undetected.
 
 The boundary and checkpoint fields come from the untimed validation call. They
 record where that call stopped under the typed verifier result and probe labels.
@@ -247,8 +282,8 @@ The repository retains one explicitly non-closing V1 timing-only local run in
 Microsoft OpenJDK 17.0.18, one 16-logical-processor Intel host, 15 rotating
 warmup rounds, and 100 samples per scenario.
 
-This older diagnostic predates the current V4 six-scenario boundary contract.
-It has four scenarios and cannot be promoted to V4 campaign evidence.
+This older diagnostic predates the current V5 six-scenario boundary contract.
+It has four scenarios and cannot be promoted to V5 campaign evidence.
 
 | Scenario | Query checkpoints | p50 | p95 | p99 | maximum |
 |---|---:|---:|---:|---:|---:|

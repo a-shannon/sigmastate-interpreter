@@ -57,7 +57,7 @@ object Eip0045CampaignValidator {
 
   private final case class ManifestContext(
       exact: ExactCampaignManifest) {
-    def manifest: CampaignManifestV2 = exact.manifest
+    def manifest: CampaignManifestV3 = exact.manifest
     def byteLength: Int = exact.byteLength
     def sha256: String = exact.sha256
   }
@@ -350,7 +350,7 @@ object Eip0045CampaignValidator {
           catch {
             case _: IllegalArgumentException => fail("evidence payload semantics are invalid")
           }
-          if (rerendered != text) fail("evidence file is not canonical V4 JSON")
+          if (rerendered != text) fail("evidence file is not canonical V5 JSON")
           validateAgainstManifest(context, payload) match {
             case Left(detail) => Left(detail)
             case Right(runId) => Right(DecodedEvidence(runId, recordedDigest))
@@ -375,6 +375,7 @@ object Eip0045CampaignValidator {
       "environment",
       "scenarios",
       "garbageCollectorDeltas",
+      "memoryPoolPhaseEnvelopes",
       "limitations"), "evidence payload")
     val resources = requireArray(payload("resources"), "evidence resources").map { itemValue =>
       val item = exactObject(itemValue,
@@ -404,7 +405,8 @@ object Eip0045CampaignValidator {
       "percentileMethod",
       "timedScope",
       "allocationScope",
-      "garbageCollectionScope"), "evidence configuration")
+      "garbageCollectionScope",
+      "memoryPoolScope"), "evidence configuration")
     requireExactConfigurationConstants(configuration)
     val environment = decodeEnvironment(payload("environment"))
     val scenarios = requireArray(payload("scenarios"), "evidence scenarios").map { value =>
@@ -457,6 +459,19 @@ object Eip0045CampaignValidator {
         requireLong(item("collections"), "collector count"),
         requireLong(item("collectionTimeMs"), "collector time"))
     }
+    val memoryPools = requireArray(
+      payload("memoryPoolPhaseEnvelopes"), "memory pool phase envelopes").map { value =>
+      val item = exactObject(value, Vector(
+        "identity",
+        "afterResetPeakUsage",
+        "endUsage",
+        "finalPeakUsage"), "memory pool phase envelope")
+      MemoryPoolPhaseEnvelope(
+        decodeMemoryPoolIdentity(item("identity")),
+        decodeMemoryUsage(item("afterResetPeakUsage"), "after-reset peak usage"),
+        decodeMemoryUsage(item("endUsage"), "end usage"),
+        decodeMemoryUsage(item("finalPeakUsage"), "final peak usage"))
+    }
     EvidencePayload(
       requireString(payload("startedAtUtc"), "evidence start time"),
       requireLong(payload("benchmarkDurationNs"), "benchmark duration"),
@@ -470,6 +485,7 @@ object Eip0045CampaignValidator {
       environment,
       scenarios,
       collectors,
+      memoryPools,
       requireStringArray(payload("limitations"), "evidence limitations"))
   }
 
@@ -489,6 +505,7 @@ object Eip0045CampaignValidator {
       "maxHeapBytes",
       "jitCompiler",
       "garbageCollectors",
+      "memoryPoolIdentities",
       "threadAllocationMeter",
       "jvmInputArgumentCount",
       "jvmInputArgumentsSha256",
@@ -509,11 +526,36 @@ object Eip0045CampaignValidator {
       requireLong(item("maxHeapBytes"), "maximum heap bytes"),
       requireString(item("jitCompiler"), "JIT compiler"),
       requireStringArray(item("garbageCollectors"), "garbage collectors"),
+      requireArray(item("memoryPoolIdentities"), "memory pool identities")
+        .map(decodeMemoryPoolIdentity),
       requireString(item("threadAllocationMeter"), "thread allocation meter"),
       requireInt(item("jvmInputArgumentCount"), "JVM input argument count"),
       requireString(item("jvmInputArgumentsSha256"), "JVM input argument digest"),
       requireString(item("cpuModel"), "CPU model"),
       requireString(item("cpuModelSource"), "CPU model source"))
+  }
+
+  private def decodeMemoryPoolIdentity(value: JsonValue): MemoryPoolIdentity = {
+    val item = exactObject(
+      value,
+      Vector("name", "memoryType"),
+      "memory pool identity")
+    MemoryPoolIdentity(
+      requireString(item("name"), "memory pool name"),
+      requireString(item("memoryType"), "memory pool type"))
+  }
+
+  private def decodeMemoryUsage(
+      value: JsonValue,
+      label: String): MemoryUsageEvidence = {
+    val item = exactObject(
+      value,
+      Vector("usedBytes", "committedBytes", "maxBytes"),
+      "memory pool " + label)
+    MemoryUsageEvidence(
+      requireLong(item("usedBytes"), label + " used bytes"),
+      requireLong(item("committedBytes"), label + " committed bytes"),
+      requireLong(item("maxBytes"), label + " maximum bytes"))
   }
 
   private def requireExactConfigurationConstants(
@@ -531,6 +573,8 @@ object Eip0045CampaignValidator {
         expected.allocationScope) fail("evidence allocation scope is invalid")
     if (requireString(fields("garbageCollectionScope"), "evidence GC scope") !=
         expected.garbageCollectionScope) fail("evidence GC scope is invalid")
+    if (requireString(fields("memoryPoolScope"), "evidence memory pool scope") !=
+        expected.memoryPoolScope) fail("evidence memory pool scope is invalid")
   }
 
   private def validateAgainstManifest(
@@ -554,7 +598,7 @@ object Eip0045CampaignValidator {
     if (scenarioPolicies != manifest.scenarios)
       return Left("evidence scenarios do not match the campaign")
     if (payload.limitations != ExpectedCampaignLimitations)
-      return Left("evidence limitations do not match campaign-mode V4")
+      return Left("evidence limitations do not match campaign-mode V5")
     try {
       if (Instant.parse(payload.startedAtUtc).toString != payload.startedAtUtc)
         return Left("evidence start time is not canonical UTC")

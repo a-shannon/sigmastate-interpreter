@@ -6,7 +6,7 @@
 package sigma.stark.profile.benchmark
 
 import java.io.{ByteArrayOutputStream, IOException}
-import java.lang.management.ManagementFactory
+import java.lang.management.{ManagementFactory, MemoryPoolMXBean, MemoryUsage}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{FileAlreadyExistsException, Files, Paths, StandardOpenOption}
 import java.time.Instant
@@ -33,6 +33,7 @@ import sigma.stark.profile.benchmark.Eip0045CampaignContract._
 import scala.collection.JavaConverters._
 import scala.io.Source
 import scala.util.Properties
+import scala.util.control.NonFatal
 
 /** Opt-in B5 evidence harness for the EIP-0045 stock-profile JVM verifier.
   *
@@ -57,10 +58,14 @@ object Eip0045VerifierBenchmark {
   private val ChunkLengths = Array(65535, 65535, 65535, 26063)
 
   @volatile private var blackhole: Int = 0
+  private val MemoryPoolMeasurementLock = new AnyRef
 
   private[benchmark] trait ExecutionObserver {
     def beforeVerifierSetup(): Unit
     def beforeOutput(): Unit
+    def beforeValidationInvocation(): Unit = ()
+    def beforeWarmupInvocation(): Unit = ()
+    def beforeTimedInvocation(): Unit = ()
   }
 
   private object NoExecutionObserver extends ExecutionObserver {
@@ -99,7 +104,8 @@ object Eip0045VerifierBenchmark {
   private final case class Measurements(
       timingSamples: Array[Array[Long]],
       allocationSamples: Array[Array[Long]],
-      garbageCollectorDeltas: Vector[GarbageCollectorDelta])
+      garbageCollectorDeltas: Vector[GarbageCollectorDelta],
+      memoryPoolPhaseEnvelopes: Vector[MemoryPoolPhaseEnvelope])
 
   private final case class ValidationResult(
       queryCheckpoints: Int,
@@ -120,23 +126,80 @@ object Eip0045VerifierBenchmark {
     }
   }
 
-  def main(args: Array[String]): Unit = run(args, NoExecutionObserver)
+  private[benchmark] trait MemoryPoolHandle {
+    def identity: MemoryPoolIdentity
+    def isValid: Boolean
+    def resetPeakUsage(): Unit
+    def usage(): MemoryUsageEvidence
+    def peakUsage(): MemoryUsageEvidence
+  }
+
+  private[benchmark] trait MemoryPoolSource {
+    def handles(): Vector[MemoryPoolHandle]
+  }
+
+  private[benchmark] final case class MemoryPoolTopology(
+      handles: Vector[MemoryPoolHandle],
+      identities: Vector[MemoryPoolIdentity])
+
+  private final class PlatformMemoryPoolHandle(bean: MemoryPoolMXBean)
+      extends MemoryPoolHandle {
+    override val identity: MemoryPoolIdentity = MemoryPoolIdentity(
+      bean.getName,
+      if (bean.getType == null) null else bean.getType.name())
+
+    override def isValid: Boolean = bean.isValid
+    override def resetPeakUsage(): Unit = bean.resetPeakUsage()
+    override def usage(): MemoryUsageEvidence = memoryUsageEvidence(bean.getUsage)
+    override def peakUsage(): MemoryUsageEvidence = memoryUsageEvidence(bean.getPeakUsage)
+  }
+
+  private object PlatformMemoryPoolSource extends MemoryPoolSource {
+    override def handles(): Vector[MemoryPoolHandle] =
+      ManagementFactory.getMemoryPoolMXBeans.asScala
+        .map(bean => new PlatformMemoryPoolHandle(bean): MemoryPoolHandle)
+        .toVector
+  }
+
+  def main(args: Array[String]): Unit =
+    run(args, NoExecutionObserver, PlatformMemoryPoolSource)
 
   private[benchmark] def runWithObserverForTest(
       args: Array[String],
-      observer: ExecutionObserver): Unit = run(args, observer)
+      observer: ExecutionObserver): Unit = run(args, observer, PlatformMemoryPoolSource)
+
+  private[benchmark] def runWithMemoryPoolSourceForTest(
+      args: Array[String],
+      observer: ExecutionObserver,
+      memoryPoolSource: MemoryPoolSource): Unit = run(args, observer, memoryPoolSource)
 
   private[benchmark] def currentEnvironmentForTest(
       declaredCpuModel: String): EnvironmentMetadata = {
     val meter = openThreadAllocationMeter()
+    val memoryPools = openMemoryPoolTopology(PlatformMemoryPoolSource)
     environmentMetadata(
       Config(0, 1, None, Some(declaredCpuModel), "commit:" + ("0" * 40), None, None),
-      meter.description)
+      meter.description,
+      memoryPools.identities)
   }
 
-  private def run(args: Array[String], observer: ExecutionObserver): Unit = {
+  private def run(
+      args: Array[String],
+      observer: ExecutionObserver,
+      memoryPoolSource: MemoryPoolSource): Unit = {
     if (observer == null)
       throw new IllegalArgumentException("benchmark execution observer is null")
+    if (memoryPoolSource == null)
+      throw new IllegalArgumentException("benchmark memory pool source is null")
+    MemoryPoolMeasurementLock.synchronized {
+      runSerialized(args, observer, memoryPoolSource)
+    }
+  }
+
+  private def runSerialized(
+      args: Array[String],
+      observer: ExecutionObserver,
+      memoryPoolSource: MemoryPoolSource): Unit = {
     if (args != null && args.contains("--help")) {
       System.out.print(Usage)
       return
@@ -150,7 +213,11 @@ object Eip0045VerifierBenchmark {
     }
 
     val allocationMeter = openThreadAllocationMeter()
-    val environment = environmentMetadata(config, allocationMeter.description)
+    val memoryPools = openMemoryPoolTopology(memoryPoolSource)
+    val environment = environmentMetadata(
+      config,
+      allocationMeter.description,
+      memoryPools.identities)
     val campaignBinding = loadCampaignBinding(config, environment)
 
     // Campaign policy is fully resolved before profile resources are loaded or
@@ -160,9 +227,15 @@ object Eip0045VerifierBenchmark {
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
-    val validation = scenarios.map(validateScenario)
-    warmUp(scenarios, config.warmupRounds)
-    val measurements = measure(scenarios, config.sampleRounds, allocationMeter)
+    val validation = scenarios.map(scenario => validateScenario(scenario, observer))
+    warmUp(scenarios, config.warmupRounds, observer)
+    val measurements = measure(
+      scenarios,
+      config.sampleRounds,
+      allocationMeter,
+      memoryPools,
+      memoryPoolSource,
+      observer)
 
     val duration = System.nanoTime() - runStarted
     val scenarioEvidence = scenarios.indices.map { i =>
@@ -201,6 +274,7 @@ object Eip0045VerifierBenchmark {
       environment = environment,
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = measurements.garbageCollectorDeltas,
+      memoryPoolPhaseEnvelopes = measurements.memoryPoolPhaseEnvelopes,
       limitations = (campaignBinding match {
         case Some(_) => ExpectedCampaignLimitations
         case None => ExpectedCampaignLimitations.dropRight(1) :+
@@ -500,8 +574,11 @@ object Eip0045VerifierBenchmark {
           probe)))
   }
 
-  private def validateScenario(scenario: Scenario): ValidationResult = {
+  private def validateScenario(
+      scenario: Scenario,
+      observer: ExecutionObserver): ValidationResult = {
     val probe = new ValidationProbe
+    observer.beforeValidationInvocation()
     val outcome = scenario.runWithProbe(probe)
     checkOutcome(scenario, outcome)
     if (probe.queries != scenario.expectedQueries) {
@@ -535,10 +612,14 @@ object Eip0045VerifierBenchmark {
         "unclassified validation failure: " + other.code)
   }
 
-  private def warmUp(scenarios: Vector[Scenario], rounds: Int): Unit = {
+  private def warmUp(
+      scenarios: Vector[Scenario],
+      rounds: Int,
+      observer: ExecutionObserver): Unit = {
     var round = 0
     while (round < rounds) {
       runRotated(scenarios, round) { scenario =>
+        observer.beforeWarmupInvocation()
         checkOutcome(scenario, scenario.run())
       }
       round += 1
@@ -548,37 +629,194 @@ object Eip0045VerifierBenchmark {
   private def measure(
       scenarios: Vector[Scenario],
       rounds: Int,
-      allocationMeter: ThreadAllocationMeter): Measurements = {
+      allocationMeter: ThreadAllocationMeter,
+      memoryPools: MemoryPoolTopology,
+      memoryPoolSource: MemoryPoolSource,
+      observer: ExecutionObserver): Measurements = {
     val timingSamples = Array.fill(scenarios.length)(new Array[Long](rounds))
     val allocationSamples = Array.fill(scenarios.length)(new Array[Long](rounds))
-    val gcBefore = garbageCollectorSnapshot()
-    var round = 0
-    while (round < rounds) {
-      runRotated(scenarios, round) { scenario =>
-        val allocatedBefore = allocationMeter.read()
-        val started = System.nanoTime()
-        val outcome = scenario.run()
-        val elapsed = System.nanoTime() - started
-        val allocatedAfter = allocationMeter.read()
-        checkOutcome(scenario, outcome)
-        val scenarioIndex = scenarios.indexWhere(_.id == scenario.id)
-        timingSamples(scenarioIndex)(round) = elapsed
-        allocationSamples(scenarioIndex)(round) = allocatedBytesDelta(
-          allocatedBefore,
-          allocatedAfter) match {
-          case Right(value) => value
-          case Left(detail) => throw new IllegalStateException(detail)
+    val measured = captureMemoryPoolPhaseEnvelope(memoryPools, memoryPoolSource) {
+      val gcBefore = garbageCollectorSnapshot()
+      var round = 0
+      while (round < rounds) {
+        runRotated(scenarios, round) { scenario =>
+          observer.beforeTimedInvocation()
+          val allocatedBefore = allocationMeter.read()
+          val started = System.nanoTime()
+          val outcome = scenario.run()
+          val elapsed = System.nanoTime() - started
+          val allocatedAfter = allocationMeter.read()
+          checkOutcome(scenario, outcome)
+          val scenarioIndex = scenarios.indexWhere(_.id == scenario.id)
+          timingSamples(scenarioIndex)(round) = elapsed
+          allocationSamples(scenarioIndex)(round) = allocatedBytesDelta(
+            allocatedBefore,
+            allocatedAfter) match {
+            case Right(value) => value
+            case Left(detail) => throw new IllegalStateException(detail)
+          }
         }
+        round += 1
       }
-      round += 1
+      val gcAfter = garbageCollectorSnapshot()
+      garbageCollectorDeltas(gcBefore, gcAfter) match {
+        case Right(value) => value
+        case Left(detail) => throw new IllegalStateException(detail)
+      }
     }
-    val gcAfter = garbageCollectorSnapshot()
-    val gcDelta = garbageCollectorDeltas(gcBefore, gcAfter) match {
-      case Right(value) => value
-      case Left(detail) => throw new IllegalStateException(detail)
-    }
-    Measurements(timingSamples, allocationSamples, gcDelta)
+    Measurements(timingSamples, allocationSamples, measured._1, measured._2)
   }
+
+  private[benchmark] def openMemoryPoolTopology(
+      source: MemoryPoolSource): MemoryPoolTopology = {
+    if (source == null) throw new IllegalStateException("memory pool source is null")
+    val handles = try source.handles()
+    catch {
+      case NonFatal(error) =>
+        throw new IllegalStateException("memory pool topology could not be read", error)
+    }
+    if (handles == null) throw new IllegalStateException("memory pool topology is null")
+    if (handles.isEmpty) throw new IllegalStateException("memory pool topology is empty")
+    if (handles.exists(_ == null))
+      throw new IllegalStateException("memory pool topology contains a null handle")
+
+    val paired = handles.zipWithIndex.map { case (handle, index) =>
+      val identity = try handle.identity
+      catch {
+        case NonFatal(error) =>
+          throw new IllegalStateException(
+            "memory pool identity at index " + index + " could not be read",
+            error)
+      }
+      validateMemoryPoolIdentities(Vector(identity)) match {
+        case Left(detail) => throw new IllegalStateException(detail)
+        case Right(_) =>
+      }
+      requireMemoryPoolValid(handle, identity)
+      (identity, handle)
+    }.sortBy { case (identity, _) => (identity.name, identity.memoryType) }
+    val identities = paired.map(_._1)
+    validateMemoryPoolIdentities(identities) match {
+      case Left(detail) => throw new IllegalStateException(detail)
+      case Right(_) =>
+    }
+    MemoryPoolTopology(paired.map(_._2), identities)
+  }
+
+  private[benchmark] def captureMemoryPoolPhaseEnvelope[A](
+      topology: MemoryPoolTopology,
+      source: MemoryPoolSource)(
+      sampling: => A): (A, Vector[MemoryPoolPhaseEnvelope]) =
+    MemoryPoolMeasurementLock.synchronized {
+    if (topology == null) throw new IllegalStateException("memory pool topology is null")
+    if (topology.handles == null || topology.identities == null ||
+        topology.handles.length != topology.identities.length)
+      throw new IllegalStateException("memory pool topology is inconsistent")
+    validateMemoryPoolIdentities(topology.identities) match {
+      case Left(detail) => throw new IllegalStateException(detail)
+      case Right(_) =>
+    }
+
+    val preResetTopology = openMemoryPoolTopology(source)
+    if (preResetTopology.identities != topology.identities)
+      throw new IllegalStateException("memory pool topology changed before peak reset")
+
+    var i = 0
+    while (i < topology.handles.length) {
+      resetMemoryPoolPeak(topology.handles(i), topology.identities(i))
+      i += 1
+    }
+    val afterResetPeakUsage = topology.handles.indices.map { index =>
+      readMemoryPoolUsage(
+        topology.handles(index),
+        topology.identities(index),
+        peak = true,
+        phase = "after-reset peak usage")
+    }.toVector
+
+    val result = sampling
+
+    val endUsage = topology.handles.indices.map { index =>
+      readMemoryPoolUsage(
+        topology.handles(index),
+        topology.identities(index),
+        peak = false,
+        phase = "end usage")
+    }.toVector
+    val finalPeakUsage = topology.handles.indices.map { index =>
+      readMemoryPoolUsage(
+        topology.handles(index),
+        topology.identities(index),
+        peak = true,
+        phase = "final peak usage")
+    }.toVector
+    val finalTopology = openMemoryPoolTopology(source)
+    if (finalTopology.identities != topology.identities)
+      throw new IllegalStateException("memory pool topology changed during sampling")
+
+    val envelopes = topology.identities.indices.map { index =>
+      MemoryPoolPhaseEnvelope(
+        topology.identities(index),
+        afterResetPeakUsage(index),
+        endUsage(index),
+        finalPeakUsage(index))
+    }.toVector
+    validateMemoryPoolPhaseEnvelopes(topology.identities, envelopes) match {
+      case Left(detail) => throw new IllegalStateException(detail)
+      case Right(_) =>
+    }
+      (result, envelopes)
+    }
+
+  private def resetMemoryPoolPeak(
+      handle: MemoryPoolHandle,
+      identity: MemoryPoolIdentity): Unit = {
+    requireMemoryPoolValid(handle, identity)
+    try handle.resetPeakUsage()
+    catch {
+      case NonFatal(error) =>
+        throw new IllegalStateException(
+          "memory pool " + identity.name + " peak usage could not be reset",
+          error)
+    }
+  }
+
+  private def readMemoryPoolUsage(
+      handle: MemoryPoolHandle,
+      identity: MemoryPoolIdentity,
+      peak: Boolean,
+      phase: String): MemoryUsageEvidence = {
+    requireMemoryPoolValid(handle, identity)
+    val usage = try {
+      if (peak) handle.peakUsage() else handle.usage()
+    } catch {
+      case NonFatal(error) =>
+        throw new IllegalStateException(
+          "memory pool " + identity.name + " " + phase + " could not be read",
+          error)
+    }
+    validateMemoryUsageEvidence(usage, "memory pool " + identity.name + " " + phase) match {
+      case Left(detail) => throw new IllegalStateException(detail)
+      case Right(_) => usage
+    }
+  }
+
+  private def requireMemoryPoolValid(
+      handle: MemoryPoolHandle,
+      identity: MemoryPoolIdentity): Unit = {
+    val valid = try handle.isValid
+    catch {
+      case NonFatal(error) =>
+        throw new IllegalStateException(
+          "memory pool " + identity.name + " validity could not be read",
+          error)
+    }
+    if (!valid) throw new IllegalStateException("memory pool " + identity.name + " is invalid")
+  }
+
+  private def memoryUsageEvidence(usage: MemoryUsage): MemoryUsageEvidence =
+    if (usage == null) null
+    else MemoryUsageEvidence(usage.getUsed, usage.getCommitted, usage.getMax)
 
   private def runRotated(
       scenarios: Vector[Scenario],
@@ -681,7 +919,8 @@ object Eip0045VerifierBenchmark {
 
   private def environmentMetadata(
       config: Config,
-      threadAllocationMeter: String): EnvironmentMetadata = {
+      threadAllocationMeter: String,
+      memoryPoolIdentities: Vector[MemoryPoolIdentity]): EnvironmentMetadata = {
     val runtimeBean = ManagementFactory.getRuntimeMXBean
     val compilationBean = ManagementFactory.getCompilationMXBean
     val inputArgumentsIdentity = jvmInputArgumentsIdentity(
@@ -706,6 +945,7 @@ object Eip0045VerifierBenchmark {
       jitCompiler = if (compilationBean == null) "unavailable" else compilationBean.getName,
       garbageCollectors = ManagementFactory.getGarbageCollectorMXBeans.asScala
         .map(_.getName).toVector.sorted,
+      memoryPoolIdentities = memoryPoolIdentities,
       threadAllocationMeter = threadAllocationMeter,
       jvmInputArgumentCount = inputArgumentsIdentity.argumentCount,
       jvmInputArgumentsSha256 = inputArgumentsIdentity.argumentsSha256,

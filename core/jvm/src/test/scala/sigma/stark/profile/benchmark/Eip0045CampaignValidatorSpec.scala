@@ -17,10 +17,21 @@ import sigma.stark.profile.benchmark.Eip0045CampaignContract._
 import sigma.stark.profile.benchmark.Eip0045CampaignValidator._
 
 class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
-  test("V7 freezes schema versions, limitations, and the independent scenario append") {
-    Schema shouldBe "eip-0045-jvm-verifier-benchmark-v4"
-    ManifestSchema shouldBe "eip-0045-b5-campaign-manifest-v2"
+  test("V8 freezes schema versions, limitations, and the independent scenario append") {
+    Schema shouldBe "eip-0045-jvm-verifier-benchmark-v5"
+    DigestDomain shouldBe "Ergo.EIP0045.B5.Evidence.v5"
+    Canonicalization shouldBe "utf8-fixed-field-order-no-whitespace-v5"
+    ManifestSchema shouldBe "eip-0045-b5-campaign-manifest-v3"
+    ManifestCanonicalization shouldBe
+      "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v3"
     ArchiveIndexSchema shouldBe "eip-0045-b5-campaign-archive-index-v1"
+    ExpectedEvidenceContract.memoryPoolScope shouldBe
+      "sequential per-pool MemoryPoolMXBean.resetPeakUsage/getPeakUsage/getUsage boundary calls around the complete sampling phase; runner and JVM-management overhead included"
+    val memoryPoolLimitations = Vector(
+      "Memory-pool phase envelopes are JVM MXBean observations; they do not measure native memory, prove object liveness, attribute a peak to one scenario, or bound a node process.",
+      "Campaign memory-pool evidence requires a dedicated JVM with no other benchmark, Java agent, or JMX client resetting pool peaks.",
+      "Pre-reset and post-sampling topology checks do not detect transient topology changes or a non-inverting external peak reset.")
+    ExpectedCampaignLimitations.slice(6, 9) shouldBe memoryPoolLimitations
     ExpectedCampaignLimitations.takeRight(4) shouldBe Vector(
       "Resource identities cover the complete run; the scenario-to-fixture mapping is fixed by the exact benchmark source and is not encoded separately in the manifest.",
       "The po2-16 case replays checked-in bytes from an independent source; it does not reproduce or attest their upstream generation.",
@@ -112,12 +123,33 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         validateArchiveBytes(
           fixture.manifestBytes,
           fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
-          Left("evidence limitations do not match campaign-mode V4")
+          Left("evidence limitations do not match campaign-mode V5")
+      }
+    }
+    val changedMemoryPoolLimitations = memoryPoolLimitations.indices.map { offset =>
+      val index = 6 + offset
+      "text-" + offset -> ExpectedCampaignLimitations.updated(
+        index,
+        ExpectedCampaignLimitations(index) + " changed")
+    }.toVector ++ Vector(
+      "removal" -> ExpectedCampaignLimitations.patch(6, Nil, 1),
+      "order" -> ExpectedCampaignLimitations.updated(
+        6,
+        ExpectedCampaignLimitations(7)).updated(
+        7,
+        ExpectedCampaignLimitations(6)))
+    changedMemoryPoolLimitations.foreach { case (label, changed) =>
+      withClue("memory-pool limitation " + label + ": ") {
+        val payload = first.copy(limitations = changed)
+        validateArchiveBytes(
+          fixture.manifestBytes,
+          fixture.evidence.updated(0, bytes(renderEnvelope(payload)))) shouldBe
+          Left("evidence limitations do not match campaign-mode V5")
       }
     }
   }
 
-  test("V7 preserves the V6 resource prefix and appends five po2-16 identities") {
+  test("V8 preserves the V7 resource and scenario identities") {
     val v6Resources = Vector(
       ResourceMetadata(
         "profile-algorithm",
@@ -300,10 +332,10 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     }
   }
 
-  test("manifest parsing requires exact canonical bytes and the frozen V4 contract") {
+  test("manifest parsing requires exact canonical bytes and the frozen V5 contract") {
     val fixture = campaignFixture()
     ManifestCanonicalization shouldBe
-      "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v2"
+      "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v3"
     new String(fixture.manifestBytes, StandardCharsets.UTF_8).count(_ == '\n') shouldBe 1
     new String(fixture.manifestBytes, StandardCharsets.UTF_8) should endWith("\n")
     parseManifest(fixture.manifestBytes) shouldBe Right(fixture.manifest)
@@ -322,7 +354,10 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       Left("campaign profile ID does not match the EIP-0045 candidate")
     renderManifest(fixture.manifest.copy(
       evidenceContract = ExpectedEvidenceContract.copy(clock = "wall-clock"))) shouldBe
-      Left("campaign V4 evidence contract is invalid")
+      Left("campaign V5 evidence contract is invalid")
+    renderManifest(fixture.manifest.copy(
+      evidenceContract = ExpectedEvidenceContract.copy(memoryPoolScope = "other"))) shouldBe
+      Left("campaign V5 evidence contract is invalid")
     renderManifest(fixture.manifest.copy(implementationRevision = "commit:short")) shouldBe
       Left("campaign implementation revision is not an exact supported identity")
     renderManifest(fixture.manifest.copy(resources = ExpectedResources.reverse)) shouldBe
@@ -417,6 +452,24 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     renderManifest(duplicateEnvironmentValue) shouldBe
       Left("campaign environment policies contain duplicate values")
 
+    val invalidMemoryPoolType = fixture.manifest.copy(
+      environmentPolicies = fixture.manifest.environmentPolicies.updated(
+        0,
+        firstEnvironment.copy(memoryPoolIdentities =
+          firstEnvironment.memoryPoolIdentities.updated(
+            0,
+            firstEnvironment.memoryPoolIdentities.head.copy(memoryType = "OTHER")))))
+    renderManifest(invalidMemoryPoolType) shouldBe
+      Left("campaign memory pool identity policy is invalid")
+
+    val unsortedMemoryPools = fixture.manifest.copy(
+      environmentPolicies = fixture.manifest.environmentPolicies.updated(
+        0,
+        firstEnvironment.copy(memoryPoolIdentities =
+          firstEnvironment.memoryPoolIdentities.reverse)))
+    renderManifest(unsortedMemoryPools) shouldBe
+      Left("campaign memory pool identity policy is invalid")
+
     val firstArguments = fixture.manifest.jvmArgumentPolicies.head
     val duplicateJvmIdentity = fixture.manifest.copy(
       jvmArgumentPolicies = fixture.manifest.jvmArgumentPolicies.updated(
@@ -505,7 +558,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         first.scenarios.head.copy(expectedOutcome = "raw-seal-malformed-proof"))) ->
         "evidence scenarios do not match the campaign",
       first.copy(limitations = first.limitations :+ "join-negative") ->
-        "evidence limitations do not match campaign-mode V4",
+        "evidence limitations do not match campaign-mode V5",
       first.copy(startedAtUtc = "2026-08-17T00:00:00.000Z") ->
         "evidence start time is not canonical UTC")
     cases.foreach { case (payload, expected) =>
@@ -587,10 +640,10 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     }
   }
 
-  test("V3 evidence is rejected by the exact V4 schema gate") {
+  test("V4 evidence is rejected by the exact V5 schema gate") {
     val fixture = campaignFixture()
     val oldSchema = new String(fixture.evidence.head, StandardCharsets.UTF_8)
-      .replace(Schema, "eip-0045-jvm-verifier-benchmark-v3")
+      .replace(Schema, "eip-0045-jvm-verifier-benchmark-v4")
     validateArchiveBytes(
       fixture.manifestBytes,
       fixture.evidence.updated(0, bytes(oldSchema))) shouldBe
@@ -607,6 +660,21 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     val changedCollectorDeltas = first.garbageCollectorDeltas.updated(
       0,
       first.garbageCollectorDeltas.head.copy(name = changedCollectorNames.head))
+    val changedMemoryPoolIdentities = environment.memoryPoolIdentities.updated(
+      0,
+      environment.memoryPoolIdentities.head.copy(name = "Different memory pool"))
+    val changedMemoryPoolEnvelopes = first.memoryPoolPhaseEnvelopes.updated(
+      0,
+      first.memoryPoolPhaseEnvelopes.head.copy(identity = changedMemoryPoolIdentities.head))
+    val changedMemoryPoolTypes = environment.memoryPoolIdentities.updated(
+      0,
+      environment.memoryPoolIdentities.head.copy(memoryType =
+        (if (environment.memoryPoolIdentities.head.memoryType == "HEAP")
+           "NON_HEAP"
+         else "HEAP")))
+    val changedMemoryPoolTypeEnvelopes = first.memoryPoolPhaseEnvelopes.updated(
+      0,
+      first.memoryPoolPhaseEnvelopes.head.copy(identity = changedMemoryPoolTypes.head))
     val environmentCases = Vector(
       "javaRuntimeName" -> first.copy(environment = environment.copy(
         javaRuntimeName = "Different Java runtime")),
@@ -637,13 +705,19 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       "garbageCollectors" -> first.copy(
         environment = environment.copy(garbageCollectors = changedCollectorNames),
         garbageCollectorDeltas = changedCollectorDeltas),
+      "memoryPoolIdentities" -> first.copy(
+        environment = environment.copy(memoryPoolIdentities = changedMemoryPoolIdentities),
+        memoryPoolPhaseEnvelopes = changedMemoryPoolEnvelopes),
+      "memoryPoolIdentityTypes" -> first.copy(
+        environment = environment.copy(memoryPoolIdentities = changedMemoryPoolTypes),
+        memoryPoolPhaseEnvelopes = changedMemoryPoolTypeEnvelopes),
       "threadAllocationMeter" -> first.copy(environment = environment.copy(
         threadAllocationMeter = "different-thread-allocation-meter")),
       "cpuModel" -> first.copy(environment = environment.copy(
         cpuModel = "Different public CPU")),
       "cpuModelSource" -> first.copy(environment = environment.copy(
         cpuModelSource = "different-cpu-model-source")))
-    environmentCases.length shouldBe 17
+    environmentCases.length shouldBe 19
     environmentCases.foreach { case (field, payload) =>
       withClue(field + ": ") {
         validateArchiveBytes(
@@ -681,6 +755,88 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
           Left("evidence JVM argument identity does not match the declared cell policy")
       }
     }
+  }
+
+  test("memory pool identities and every phase field are validated without cross-snapshot capacity rules") {
+    val fixture = campaignFixture()
+    val first = fixture.payloads.head
+    val envelope = first.memoryPoolPhaseEnvelopes.head
+    val flexibleCapacities = first.copy(memoryPoolPhaseEnvelopes =
+      first.memoryPoolPhaseEnvelopes.updated(
+        0,
+        envelope.copy(
+          afterResetPeakUsage = MemoryUsageEvidence(100L, 150L, 200L),
+          endUsage = MemoryUsageEvidence(120L, 120L, -1L),
+          finalPeakUsage = MemoryUsageEvidence(130L, 500L, -1L))))
+    validateArchiveBytes(
+      fixture.manifestBytes,
+      fixture.evidence.updated(0, bytes(renderEnvelope(flexibleCapacities)))).isRight shouldBe true
+
+    val invalid = Vector(
+      "after-reset-used" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(afterResetPeakUsage =
+            envelope.afterResetPeakUsage.copy(usedBytes = -1L)))),
+      "after-reset-committed" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(afterResetPeakUsage =
+            envelope.afterResetPeakUsage.copy(committedBytes = -1L)))),
+      "after-reset-max" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(afterResetPeakUsage =
+            envelope.afterResetPeakUsage.copy(maxBytes = -2L)))),
+      "end-committed" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(endUsage = envelope.endUsage.copy(
+            committedBytes = envelope.endUsage.usedBytes - 1L)))),
+      "final-max" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(finalPeakUsage = envelope.finalPeakUsage.copy(
+            maxBytes = envelope.finalPeakUsage.committedBytes - 1L)))),
+      "peak-coverage" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(finalPeakUsage = envelope.finalPeakUsage.copy(
+            usedBytes = envelope.endUsage.usedBytes - 1L)))),
+      "after-reset-peak-coverage" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(
+            endUsage = envelope.endUsage.copy(
+              usedBytes = envelope.afterResetPeakUsage.usedBytes - 20L),
+            finalPeakUsage = envelope.finalPeakUsage.copy(
+              usedBytes = envelope.afterResetPeakUsage.usedBytes - 1L)))),
+      "identity" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.updated(
+          0,
+          envelope.copy(identity = envelope.identity.copy(name = "other-pool")))),
+      "missing-envelope" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.dropRight(1)),
+      "extra-envelope" -> first.copy(memoryPoolPhaseEnvelopes =
+        (first.memoryPoolPhaseEnvelopes :+ envelope.copy(
+          identity = MemoryPoolIdentity("zz-extra-pool", "HEAP")))),
+      "reordered-envelopes" -> first.copy(memoryPoolPhaseEnvelopes =
+        first.memoryPoolPhaseEnvelopes.reverse))
+    invalid.foreach { case (label, payload) =>
+      withClue(label + ": ") {
+        validateArchiveBytes(
+          fixture.manifestBytes,
+          fixture.evidence.updated(0, bytes(uncheckedEnvelope(payload)))) shouldBe
+          Left("evidence payload semantics are invalid")
+      }
+    }
+
+    val changedScope = new String(fixture.evidence.head, StandardCharsets.UTF_8)
+      .replace(ExpectedEvidenceContract.memoryPoolScope, "different memory pool scope")
+    validateArchiveBytes(
+      fixture.manifestBytes,
+      fixture.evidence.updated(0, bytes(changedScope))) shouldBe
+      Left("evidence memory pool scope is invalid")
   }
 
   test("shared run-policy resolver selects every run from the exact manifest bytes") {
@@ -892,12 +1048,15 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     val revision = "commit:" + ("1" * 40)
     try {
       val environment = Eip0045VerifierBenchmark.currentEnvironmentForTest(cpuModel)
+      environment.memoryPoolIdentities should not be empty
+      environment.memoryPoolIdentities shouldBe
+        sortMemoryPoolIdentities(environment.memoryPoolIdentities)
       val environmentPolicy = environmentPolicyFromMetadata("env-current", environment)
       val argumentPolicy = JvmArgumentPolicy(
         "args-current",
         environment.jvmInputArgumentCount,
         environment.jvmInputArgumentsSha256)
-      val manifest = CampaignManifestV2(
+      val manifest = CampaignManifestV3(
         campaignId = "campaign-real-e2e",
         profileId = ExpectedProfileId,
         implementationRevision = revision,
@@ -927,6 +1086,12 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       val evidenceText = new String(evidenceBytes, StandardCharsets.UTF_8)
       evidenceText should include(
         "\"campaignBinding\":{\"runId\":\"cell-current:r1\"")
+      evidenceText should include("\"memoryPoolPhaseEnvelopes\":[{")
+      environment.memoryPoolIdentities.foreach { identity =>
+        evidenceText should include(
+          "\"identity\":{\"name\":" + quote(identity.name) +
+            ",\"memoryType\":" + quote(identity.memoryType) + "}")
+      }
       evidenceText should include(
         "\"id\":\"valid-independent-po2-16\",\"expectedOutcome\":\"verified:1:16\"," +
           "\"validationQueryCheckpoints\":50,\"validationBoundary\":" +
@@ -1304,7 +1469,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
   }
 
   private final class Fixture(
-      val manifest: CampaignManifestV2,
+      val manifest: CampaignManifestV3,
       val manifestBytes: Array[Byte],
       val payloads: Vector[EvidencePayload],
       val evidence: Vector[Array[Byte]])
@@ -1314,7 +1479,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
     val environmentB = environmentPolicy("env-b", "Reference CPU B", 8192L)
     val argumentsA = JvmArgumentPolicy("args-a", 2, "a" * 64)
     val argumentsB = JvmArgumentPolicy("args-b", 3, "b" * 64)
-    val manifest = CampaignManifestV2(
+    val manifest = CampaignManifestV3(
       campaignId = "campaign-2026-08",
       profileId = ExpectedProfileId,
       implementationRevision = "commit:dd428dde103d4b69a85456ca176c97fe099f8908",
@@ -1374,6 +1539,9 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       heap,
       "HotSpot 64-Bit Tiered Compilers",
       Vector("G1 Old Generation", "G1 Young Generation"),
+      Vector(
+        MemoryPoolIdentity("G1 Eden Space", "HEAP"),
+        MemoryPoolIdentity("Metaspace", "NON_HEAP")),
       ExpectedThreadAllocationMeter,
       cpu,
       "--cpu-model")
@@ -1397,12 +1565,13 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       environment.maxHeapBytes,
       environment.jitCompiler,
       environment.garbageCollectors,
+      environment.memoryPoolIdentities,
       environment.threadAllocationMeter,
       environment.cpuModel,
       environment.cpuModelSource)
 
   private def evidencePayload(
-      manifest: CampaignManifestV2,
+      manifest: CampaignManifestV3,
       run: CampaignRun,
       environment: EnvironmentPolicy,
       arguments: JvmArgumentPolicy,
@@ -1449,6 +1618,7 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
         environment.maxHeapBytes,
         environment.jitCompiler,
         environment.garbageCollectors,
+        environment.memoryPoolIdentities,
         environment.threadAllocationMeter,
         arguments.argumentCount,
         arguments.argumentsSha256,
@@ -1457,6 +1627,15 @@ class Eip0045CampaignValidatorSpec extends AnyFunSuite with Matchers {
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = environment.garbageCollectors.zipWithIndex.map {
         case (name, index) => GarbageCollectorDelta(name, index.toLong, index.toLong + 1L)
+      },
+      memoryPoolPhaseEnvelopes = environment.memoryPoolIdentities.zipWithIndex.map {
+        case (identity, index) =>
+          val base = 100L + index.toLong * 100L
+          MemoryPoolPhaseEnvelope(
+            identity,
+            MemoryUsageEvidence(base, base + 50L, -1L),
+            MemoryUsageEvidence(base + 20L, base + 80L, base + 180L),
+            MemoryUsageEvidence(base + 30L, base + 70L, base + 170L))
       },
       limitations = ExpectedCampaignLimitations)
   }

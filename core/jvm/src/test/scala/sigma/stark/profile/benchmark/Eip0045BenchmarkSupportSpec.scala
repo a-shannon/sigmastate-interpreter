@@ -7,10 +7,15 @@ package sigma.stark.profile.benchmark
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
+import sigma.stark.profile.benchmark.Eip0045CampaignContract.ExpectedScenarios
+
+import scala.collection.mutable.ArrayBuffer
 
 class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
   test("argument parsing is bounded, explicit, and deterministic") {
@@ -201,19 +206,102 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       Left("garbage collector old collection time moved backwards")
   }
 
+  test("memory pool phase envelopes enforce snapshot invariants without freezing committed or max") {
+    val identities = Vector(
+      MemoryPoolIdentity("heap", "HEAP"),
+      MemoryPoolIdentity("metaspace", "NON_HEAP"))
+    val envelopes = Vector(
+      MemoryPoolPhaseEnvelope(
+        identities(0),
+        MemoryUsageEvidence(10L, 20L, -1L),
+        MemoryUsageEvidence(15L, 40L, 80L),
+        MemoryUsageEvidence(20L, 30L, 60L)),
+      MemoryPoolPhaseEnvelope(
+        identities(1),
+        MemoryUsageEvidence(3L, 8L, 10L),
+        MemoryUsageEvidence(4L, 6L, -1L),
+        MemoryUsageEvidence(5L, 9L, 12L)))
+
+    validateMemoryPoolPhaseEnvelopes(identities, envelopes) shouldBe Right(())
+    validateMemoryPoolIdentities(null) shouldBe
+      Left("memory pool identities are null")
+    validateMemoryPoolIdentities(Vector.empty) shouldBe
+      Left("memory pool identities are empty")
+    validateMemoryPoolIdentities(Vector.fill(MaxMemoryPools + 1)(identities.head)) shouldBe
+      Left("memory pool identity count exceeds " + MaxMemoryPools)
+    validateMemoryPoolIdentities(Vector(null)) shouldBe
+      Left("memory pool identities contain null")
+    validateMemoryPoolIdentities(identities.reverse) shouldBe
+      Left("memory pool identities are not sorted")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity("heap", "OTHER"))) shouldBe
+      Left("memory pool identity type is invalid")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity("", "HEAP"))) shouldBe
+      Left("memory pool identity name is invalid")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity(null, "HEAP"))) shouldBe
+      Left("memory pool identity name is invalid")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity("x" * 4097, "HEAP"))) shouldBe
+      Left("memory pool identity name is invalid")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity("bad\nname", "HEAP"))) shouldBe
+      Left("memory pool identity name is invalid")
+    validateMemoryPoolIdentities(Vector(MemoryPoolIdentity(
+      new String(Array(0xd800.toChar)),
+      "HEAP"))) shouldBe Left("memory pool identity name is invalid")
+    validateMemoryPoolIdentities(Vector(identities.head, identities.head)) shouldBe
+      Left("memory pool identities contain duplicates")
+    validateMemoryUsageEvidence(null, "snapshot") shouldBe
+      Left("snapshot is null")
+    validateMemoryUsageEvidence(
+      MemoryUsageEvidence(-1L, 0L, -1L),
+      "snapshot") shouldBe Left("snapshot used bytes are negative")
+    validateMemoryUsageEvidence(
+      MemoryUsageEvidence(0L, -1L, -1L),
+      "snapshot") shouldBe Left("snapshot committed bytes are negative")
+    validateMemoryUsageEvidence(
+      MemoryUsageEvidence(0L, 0L, -2L),
+      "snapshot") shouldBe Left("snapshot maximum bytes are invalid")
+    validateMemoryUsageEvidence(
+      MemoryUsageEvidence(21L, 20L, 30L),
+      "snapshot") shouldBe Left("snapshot used bytes exceed committed bytes")
+    validateMemoryUsageEvidence(
+      MemoryUsageEvidence(10L, 20L, 19L),
+      "snapshot") shouldBe Left("snapshot committed bytes exceed maximum bytes")
+    validateMemoryPoolPhaseEnvelopes(
+      identities,
+      envelopes.updated(
+        0,
+        envelopes.head.copy(finalPeakUsage = MemoryUsageEvidence(14L, 30L, 60L)))) shouldBe
+      Left("memory pool heap final peak used bytes are below end used bytes")
+    validateMemoryPoolPhaseEnvelopes(
+      identities,
+      envelopes.updated(
+        0,
+        envelopes.head.copy(finalPeakUsage = MemoryUsageEvidence(9L, 30L, 60L)))) shouldBe
+      Left("memory pool heap final peak used bytes are below after-reset peak used bytes")
+    validateMemoryPoolPhaseEnvelopes(identities, envelopes.dropRight(1)) shouldBe
+      Left("memory pool phase envelope identities do not match the environment")
+    validateMemoryPoolPhaseEnvelopes(identities, envelopes.reverse) shouldBe
+      Left("memory pool phase envelope identities do not match the environment")
+    validateMemoryPoolPhaseEnvelopes(identities, null) shouldBe
+      Left("memory pool phase envelopes are null")
+    validateMemoryPoolPhaseEnvelopes(identities, Vector.empty) shouldBe
+      Left("memory pool phase envelopes are empty")
+    validateMemoryPoolPhaseEnvelopes(identities, Vector(null)) shouldBe
+      Left("memory pool phase envelopes contain null")
+  }
+
   test("JSON quoting is complete for evidence-controlled strings") {
     quote("a\"b\\c\n\t" + 1.toChar) shouldBe "\"a\\\"b\\\\c\\n\\t\\u0001\""
   }
 
   test("domain-separated evidence digest has an independent golden value") {
     evidenceDigest("{\"a\":1}") shouldBe
-      "92a6044ce2513c2951ebddca3bd1bda0574bb4feea58066b84125eede9da187e"
+      "cf1aea685225c7a477c259f727950cb96f124be2dc6764bbea7a7916484ca062"
   }
 
   test("evidence envelope is canonical and binds raw samples and metadata") {
     val payload = samplePayload(Vector(10L, 20L))
     val rendered = renderEnvelope(payload)
-    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v4\"")
+    rendered should startWith("{\"schema\":\"eip-0045-jvm-verifier-benchmark-v5\"")
     rendered should endWith("}\n")
     rendered should include("\"campaignBinding\":{\"runId\":\"host-a:run-01\",\"manifestByteLength\":9")
     rendered should include("\"samplesNs\":[10,20]")
@@ -221,6 +309,10 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
     rendered should include("\"allocatedBytes\":[100,200]")
     rendered should include("\"p99Bytes\":200")
     rendered should include("\"jvmInputArgumentCount\":2")
+    rendered should include(
+      "\"memoryPoolIdentities\":[{\"name\":\"heap\",\"memoryType\":\"HEAP\"}]")
+    rendered should include(
+      "\"afterResetPeakUsage\":{\"usedBytes\":10,\"committedBytes\":20,\"maxBytes\":-1}")
     rendered should include("\"validationBoundary\":\"verification-complete\"")
     rendered should include("\"lastVerifierCheckpoint\":\"query\"")
     rendered should include("\"garbageCollectorDeltas\":[{\"name\":\"gc\",\"collections\":1,\"collectionTimeMs\":2}]")
@@ -233,11 +325,16 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       campaignBinding = Some(payload.campaignBinding.get.copy(runId = "host-a:run-02"))))
     val changedJvmArguments = renderEnvelope(payload.copy(
       environment = payload.environment.copy(jvmInputArgumentsSha256 = "c" * 64)))
+    val changedMemory = renderEnvelope(payload.copy(
+      memoryPoolPhaseEnvelopes = payload.memoryPoolPhaseEnvelopes.map { envelope =>
+        envelope.copy(finalPeakUsage = envelope.finalPeakUsage.copy(usedBytes = 21L))
+      }))
     digestFrom(rendered) shouldBe evidenceDigest(renderPayload(payload))
     digestFrom(rendered) should not be digestFrom(changed)
     digestFrom(rendered) should not be digestFrom(changedManifest)
     digestFrom(rendered) should not be digestFrom(changedRun)
     digestFrom(rendered) should not be digestFrom(changedJvmArguments)
+    digestFrom(rendered) should not be digestFrom(changedMemory)
     renderEnvelope(payload) shouldBe rendered
   }
 
@@ -345,6 +442,527 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
     } finally Files.deleteIfExists(directory)
   }
 
+  test("memory pool handles are sorted and sampled in the fixed phase order") {
+    val events = ArrayBuffer.empty[String]
+
+    final class Handle(
+        override val identity: MemoryPoolIdentity,
+        afterResetPeak: MemoryUsageEvidence,
+        end: MemoryUsageEvidence,
+        finalPeak: MemoryUsageEvidence)
+        extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      private var peakReads = 0
+      override def isValid: Boolean = {
+        events += ("valid:" + identity.name)
+        true
+      }
+      override def resetPeakUsage(): Unit = events += ("reset:" + identity.name)
+      override def usage(): MemoryUsageEvidence = {
+        events += ("usage:" + identity.name)
+        end
+      }
+      override def peakUsage(): MemoryUsageEvidence = {
+        events += ("peak:" + identity.name)
+        peakReads += 1
+        if (peakReads == 1) afterResetPeak else finalPeak
+      }
+    }
+
+    val a = new Handle(
+      MemoryPoolIdentity("a-heap", "HEAP"),
+      MemoryUsageEvidence(10L, 20L, -1L),
+      MemoryUsageEvidence(20L, 40L, 80L),
+      MemoryUsageEvidence(25L, 30L, 60L))
+    val z = new Handle(
+      MemoryPoolIdentity("z-meta", "NON_HEAP"),
+      MemoryUsageEvidence(4L, 10L, 20L),
+      MemoryUsageEvidence(5L, 8L, -1L),
+      MemoryUsageEvidence(8L, 12L, 30L))
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        events += "source"
+        Vector(z, a)
+      }
+    }
+
+    val topology = Eip0045VerifierBenchmark.openMemoryPoolTopology(source)
+    topology.identities shouldBe Vector(a.identity, z.identity)
+    val measured = Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(
+      topology,
+      source) {
+      events += "sampling"
+      "complete"
+    }
+    measured._1 shouldBe "complete"
+    measured._2.map(_.identity) shouldBe Vector(a.identity, z.identity)
+    measured._2.head shouldBe MemoryPoolPhaseEnvelope(
+      a.identity,
+      MemoryUsageEvidence(10L, 20L, -1L),
+      MemoryUsageEvidence(20L, 40L, 80L),
+      MemoryUsageEvidence(25L, 30L, 60L))
+    events.toVector shouldBe Vector(
+      "source", "valid:z-meta", "valid:a-heap",
+      "source", "valid:z-meta", "valid:a-heap",
+      "valid:a-heap", "reset:a-heap",
+      "valid:z-meta", "reset:z-meta",
+      "valid:a-heap", "peak:a-heap",
+      "valid:z-meta", "peak:z-meta",
+      "sampling",
+      "valid:a-heap", "usage:a-heap",
+      "valid:z-meta", "usage:z-meta",
+      "valid:a-heap", "peak:a-heap",
+      "valid:z-meta", "peak:z-meta",
+      "source", "valid:z-meta", "valid:a-heap")
+  }
+
+  test("fresh topology checks never replace the policy-bound memory pool handles") {
+    val poolIdentity = MemoryPoolIdentity("heap", "HEAP")
+    final class OriginalHandle extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override val identity: MemoryPoolIdentity = poolIdentity
+      var resets: Int = 0
+      var usageReads: Int = 0
+      var peakReads: Int = 0
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = resets += 1
+      override def usage(): MemoryUsageEvidence = {
+        usageReads += 1
+        MemoryUsageEvidence(20L, 30L, -1L)
+      }
+      override def peakUsage(): MemoryUsageEvidence = {
+        peakReads += 1
+        if (peakReads == 1) MemoryUsageEvidence(10L, 25L, -1L)
+        else MemoryUsageEvidence(25L, 35L, -1L)
+      }
+    }
+    final class CheckOnlyHandle extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override val identity: MemoryPoolIdentity = poolIdentity
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit =
+        throw new IllegalStateException("fresh topology handle was reset")
+      override def usage(): MemoryUsageEvidence =
+        throw new IllegalStateException("fresh topology handle usage was read")
+      override def peakUsage(): MemoryUsageEvidence =
+        throw new IllegalStateException("fresh topology handle peak was read")
+    }
+    val original = new OriginalHandle
+    var reads = 0
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        reads += 1
+        if (reads == 1) Vector(original) else Vector(new CheckOnlyHandle)
+      }
+    }
+
+    val topology = Eip0045VerifierBenchmark.openMemoryPoolTopology(source)
+    val measured = Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(
+      topology,
+      source)("sampled")
+    measured shouldBe ("sampled" -> Vector(MemoryPoolPhaseEnvelope(
+      poolIdentity,
+      MemoryUsageEvidence(10L, 25L, -1L),
+      MemoryUsageEvidence(20L, 30L, -1L),
+      MemoryUsageEvidence(25L, 35L, -1L))))
+    reads shouldBe 3
+    original.resets shouldBe 1
+    original.usageReads shouldBe 1
+    original.peakReads shouldBe 2
+  }
+
+  test("memory pool sampling phases are serialized within the runner instance") {
+    val firstSamplingEntered = new CountDownLatch(1)
+    val releaseFirstSampling = new CountDownLatch(1)
+    val secondStarted = new CountDownLatch(1)
+    val secondReset = new CountDownLatch(1)
+    val failures = new ConcurrentLinkedQueue[Throwable]()
+
+    final class Handle(
+        override val identity: MemoryPoolIdentity,
+        onReset: () => Unit)
+        extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = onReset()
+      override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+      override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+    }
+    def sourceOf(handle: Eip0045VerifierBenchmark.MemoryPoolHandle) =
+      new Eip0045VerifierBenchmark.MemoryPoolSource {
+        override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+          Vector(handle)
+      }
+
+    val firstSource = sourceOf(new Handle(
+      MemoryPoolIdentity("first-heap", "HEAP"),
+      () => ()))
+    val secondSource = sourceOf(new Handle(
+      MemoryPoolIdentity("second-heap", "HEAP"),
+      () => secondReset.countDown()))
+    val firstTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(firstSource)
+    val secondTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(secondSource)
+
+    val first = new Thread(new Runnable {
+      override def run(): Unit = try {
+        Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(
+          firstTopology,
+          firstSource) {
+          firstSamplingEntered.countDown()
+          if (!releaseFirstSampling.await(5L, TimeUnit.SECONDS))
+            throw new IllegalStateException("first sampling release timed out")
+        }
+      } catch {
+        case error: Throwable => failures.add(error)
+      }
+    }, "eip0045-memory-pool-first")
+    val second = new Thread(new Runnable {
+      override def run(): Unit = try {
+        secondStarted.countDown()
+        Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(
+          secondTopology,
+          secondSource)(())
+      } catch {
+        case error: Throwable => failures.add(error)
+      }
+    }, "eip0045-memory-pool-second")
+
+    first.start()
+    try {
+      firstSamplingEntered.await(5L, TimeUnit.SECONDS) shouldBe true
+      second.start()
+      secondStarted.await(5L, TimeUnit.SECONDS) shouldBe true
+      val blockedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
+      while (second.getState != Thread.State.BLOCKED &&
+          secondReset.getCount != 0L && System.nanoTime() < blockedDeadline) {
+        Thread.`yield`()
+      }
+      secondReset.getCount shouldBe 1L
+      second.getState shouldBe Thread.State.BLOCKED
+    } finally {
+      releaseFirstSampling.countDown()
+      first.join(5000L)
+      second.join(5000L)
+    }
+
+    first.isAlive shouldBe false
+    second.isAlive shouldBe false
+    secondReset.await(1L, TimeUnit.SECONDS) shouldBe true
+    if (!failures.isEmpty) fail("memory pool worker failed", failures.peek())
+  }
+
+  test("successful production order is validation then warmup then reset and sampling") {
+    val events = ArrayBuffer.empty[String]
+    final class Handle extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override val identity: MemoryPoolIdentity = MemoryPoolIdentity("test-heap", "HEAP")
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = events += "reset"
+      override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+      override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+    }
+    val handle = new Handle
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+        Vector(handle)
+    }
+    val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeVerifierSetup(): Unit = events += "setup"
+      override def beforeValidationInvocation(): Unit = events += "validation"
+      override def beforeWarmupInvocation(): Unit = events += "warmup"
+      override def beforeTimedInvocation(): Unit = events += "sample"
+      override def beforeOutput(): Unit = events += "output"
+    }
+    val directory = Files.createTempDirectory("eip0045-memory-pool-order-")
+    val output = directory.resolve("evidence.json")
+    try {
+      Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+        "--warmup-rounds", "1",
+        "--sample-rounds", "1",
+        "--implementation-revision", "commit:" + ("1" * 40),
+        "--cpu-model", "Test CPU",
+        "--output", output.toString), observer, source)
+
+      val validation = events.zipWithIndex.collect {
+        case ("validation", index) => index
+      }
+      val warmup = events.zipWithIndex.collect {
+        case ("warmup", index) => index
+      }
+      val samples = events.zipWithIndex.collect {
+        case ("sample", index) => index
+      }
+      validation.length shouldBe ExpectedScenarios.length
+      warmup.length shouldBe ExpectedScenarios.length
+      samples.length shouldBe ExpectedScenarios.length
+      events.indexOf("setup") should be < validation.head
+      validation.last should be < warmup.head
+      warmup.last should be < events.indexOf("reset")
+      events.indexOf("reset") should be < samples.head
+      samples.last should be < events.indexOf("output")
+      Files.isRegularFile(output) shouldBe true
+    } finally {
+      Files.deleteIfExists(output)
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  test("complete benchmark runs are serialized before verifier setup") {
+    val firstTimedInvocation = new CountDownLatch(1)
+    val releaseFirstRun = new CountDownLatch(1)
+    val secondStarted = new CountDownLatch(1)
+    val secondVerifierSetup = new CountDownLatch(1)
+    val firstTimedOnce = new AtomicBoolean(false)
+    val failures = new ConcurrentLinkedQueue[Throwable]()
+
+    final class Handle(name: String) extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override val identity: MemoryPoolIdentity = MemoryPoolIdentity(name, "HEAP")
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = ()
+      override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+      override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+    }
+    def source(name: String) = {
+      val handle = new Handle(name)
+      new Eip0045VerifierBenchmark.MemoryPoolSource {
+        override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+          Vector(handle)
+      }
+    }
+    val firstObserver = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeVerifierSetup(): Unit = ()
+      override def beforeTimedInvocation(): Unit = {
+        if (firstTimedOnce.compareAndSet(false, true)) {
+          firstTimedInvocation.countDown()
+          if (!releaseFirstRun.await(10L, TimeUnit.SECONDS))
+            throw new IllegalStateException("first benchmark release timed out")
+        }
+      }
+      override def beforeOutput(): Unit = ()
+    }
+    val secondObserver = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeVerifierSetup(): Unit = secondVerifierSetup.countDown()
+      override def beforeOutput(): Unit = ()
+    }
+    val directory = Files.createTempDirectory("eip0045-complete-run-lock-")
+    val firstOutput = directory.resolve("first.json")
+    val secondOutput = directory.resolve("second.json")
+    def args(output: java.nio.file.Path): Array[String] = Array(
+      "--warmup-rounds", "0",
+      "--sample-rounds", "1",
+      "--implementation-revision", "commit:" + ("1" * 40),
+      "--cpu-model", "Test CPU",
+      "--output", output.toString)
+
+    val first = new Thread(new Runnable {
+      override def run(): Unit = try {
+        Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(
+          args(firstOutput), firstObserver, source("first-heap"))
+      } catch {
+        case error: Throwable => failures.add(error)
+      }
+    }, "eip0045-complete-run-first")
+    val second = new Thread(new Runnable {
+      override def run(): Unit = try {
+        secondStarted.countDown()
+        Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(
+          args(secondOutput), secondObserver, source("second-heap"))
+      } catch {
+        case error: Throwable => failures.add(error)
+      }
+    }, "eip0045-complete-run-second")
+
+    try {
+      first.start()
+      try {
+        firstTimedInvocation.await(15L, TimeUnit.SECONDS) shouldBe true
+        second.start()
+        secondStarted.await(5L, TimeUnit.SECONDS) shouldBe true
+        val blockedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
+        while (second.getState != Thread.State.BLOCKED &&
+            secondVerifierSetup.getCount != 0L && System.nanoTime() < blockedDeadline) {
+          Thread.`yield`()
+        }
+        secondVerifierSetup.getCount shouldBe 1L
+        second.getState shouldBe Thread.State.BLOCKED
+      } finally {
+        releaseFirstRun.countDown()
+        first.join(30000L)
+        second.join(30000L)
+      }
+
+      first.isAlive shouldBe false
+      second.isAlive shouldBe false
+      secondVerifierSetup.await(1L, TimeUnit.SECONDS) shouldBe true
+      if (!failures.isEmpty) fail("complete benchmark worker failed", failures.peek())
+      Files.isRegularFile(firstOutput) shouldBe true
+      Files.isRegularFile(secondOutput) shouldBe true
+    } finally {
+      releaseFirstRun.countDown()
+      if (first.isAlive) first.join(30000L)
+      if (second.isAlive) second.join(30000L)
+      Files.deleteIfExists(firstOutput)
+      Files.deleteIfExists(secondOutput)
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  test("memory pool source, reset, read, validity, and topology drift fail closed") {
+    final class Handle(
+        override val identity: MemoryPoolIdentity,
+        valid: () => Boolean = () => true,
+        reset: () => Unit = () => (),
+        current: () => MemoryUsageEvidence = () => MemoryUsageEvidence(2L, 4L, -1L),
+        peak: () => MemoryUsageEvidence = () => MemoryUsageEvidence(3L, 5L, -1L))
+        extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override def isValid: Boolean = valid()
+      override def resetPeakUsage(): Unit = reset()
+      override def usage(): MemoryUsageEvidence = current()
+      override def peakUsage(): MemoryUsageEvidence = peak()
+    }
+    def sourceOf(handle: Eip0045VerifierBenchmark.MemoryPoolHandle) =
+      new Eip0045VerifierBenchmark.MemoryPoolSource {
+        override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+          Vector(handle)
+      }
+
+    val nullTopology = intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(
+        new Eip0045VerifierBenchmark.MemoryPoolSource {
+          override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = null
+        })
+    }
+    nullTopology.getMessage shouldBe "memory pool topology is null"
+
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(
+        new Eip0045VerifierBenchmark.MemoryPoolSource {
+          override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+            Vector.empty
+        })
+    }.getMessage shouldBe "memory pool topology is empty"
+
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(
+        new Eip0045VerifierBenchmark.MemoryPoolSource {
+          override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+            Vector(null)
+        })
+    }.getMessage shouldBe "memory pool topology contains a null handle"
+
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(
+        new Eip0045VerifierBenchmark.MemoryPoolSource {
+          override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+            throw new IllegalArgumentException("source failed")
+        })
+    }.getMessage shouldBe "memory pool topology could not be read"
+
+    val invalid = new Handle(MemoryPoolIdentity("heap", "HEAP"), valid = () => false)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(sourceOf(invalid))
+    }.getMessage shouldBe "memory pool heap is invalid"
+
+    val nullIdentity = new Handle(null)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.openMemoryPoolTopology(sourceOf(nullIdentity))
+    }.getMessage shouldBe "memory pool identities contain null"
+
+    val resetFailure = new Handle(
+      MemoryPoolIdentity("heap", "HEAP"),
+      reset = () => throw new IllegalArgumentException("reset failed"))
+    val resetSource = sourceOf(resetFailure)
+    val resetTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(resetSource)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(resetTopology, resetSource)(())
+    }.getMessage shouldBe "memory pool heap peak usage could not be reset"
+
+    val readFailure = new Handle(
+      MemoryPoolIdentity("heap", "HEAP"),
+      peak = () => null)
+    val readSource = sourceOf(readFailure)
+    val readTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(readSource)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(readTopology, readSource)(())
+    }.getMessage shouldBe "memory pool heap after-reset peak usage is null"
+
+    val stable = new Handle(MemoryPoolIdentity("heap", "HEAP"))
+    val changed = new Handle(MemoryPoolIdentity("other", "HEAP"))
+    var sourceReads = 0
+    val driftingSource = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        sourceReads += 1
+        if (sourceReads < 3) Vector(stable) else Vector(changed)
+      }
+    }
+    val driftTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(driftingSource)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(driftTopology, driftingSource)(())
+    }.getMessage shouldBe "memory pool topology changed during sampling"
+
+    var preResetReads = 0
+    val preResetDrift = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        preResetReads += 1
+        if (preResetReads == 1) Vector(stable) else Vector(changed)
+      }
+    }
+    val preResetTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(preResetDrift)
+    intercept[IllegalStateException] {
+      Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(
+        preResetTopology,
+        preResetDrift)(())
+    }.getMessage shouldBe "memory pool topology changed before peak reset"
+
+    val fatal = new OutOfMemoryError("fatal reset")
+    val fatalHandle = new Handle(
+      MemoryPoolIdentity("heap", "HEAP"),
+      reset = () => throw fatal)
+    val fatalSource = sourceOf(fatalHandle)
+    val fatalTopology = Eip0045VerifierBenchmark.openMemoryPoolTopology(fatalSource)
+    intercept[OutOfMemoryError] {
+      Eip0045VerifierBenchmark.captureMemoryPoolPhaseEnvelope(fatalTopology, fatalSource)(())
+    } shouldBe fatal
+  }
+
+  test("a post-sampling memory pool topology drift creates no producer output") {
+    final class Handle(override val identity: MemoryPoolIdentity)
+        extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = ()
+      override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+      override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+    }
+    val stable = new Handle(MemoryPoolIdentity("test-heap", "HEAP"))
+    val changed = new Handle(MemoryPoolIdentity("changed-heap", "HEAP"))
+    var topologyReads = 0
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        topologyReads += 1
+        if (topologyReads < 3) Vector(stable) else Vector(changed)
+      }
+    }
+    var verifierSetups = 0
+    var outputAttempts = 0
+    val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeVerifierSetup(): Unit = verifierSetups += 1
+      override def beforeOutput(): Unit = outputAttempts += 1
+    }
+    val directory = Files.createTempDirectory("eip0045-memory-pool-drift-")
+    val output = directory.resolve("evidence.json")
+    try {
+      intercept[IllegalStateException] {
+        Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+          "--warmup-rounds", "0",
+          "--sample-rounds", "1",
+          "--implementation-revision", "commit:" + ("1" * 40),
+          "--cpu-model", "Test CPU",
+          "--output", output.toString), observer, source)
+      }.getMessage shouldBe "memory pool topology changed during sampling"
+      verifierSetups shouldBe 1
+      outputAttempts shouldBe 0
+      Files.exists(output) shouldBe false
+    } finally {
+      Files.deleteIfExists(output)
+      Files.deleteIfExists(directory)
+    }
+  }
+
   private def failedCampaignMessage(
       directory: java.nio.file.Path,
       manifest: java.nio.file.Path,
@@ -396,6 +1014,7 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         1024,
         "jit",
         Vector("gc"),
+        Vector(MemoryPoolIdentity("heap", "HEAP")),
         "com.sun.management.ThreadMXBean.getThreadAllocatedBytes(currentThread)",
         2,
         "d" * 64,
@@ -412,6 +1031,11 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         Vector(100L, 200L),
         AllocationStatistics(2, 100, 200, 200, 200))),
       garbageCollectorDeltas = Vector(GarbageCollectorDelta("gc", 1, 2)),
+      memoryPoolPhaseEnvelopes = Vector(MemoryPoolPhaseEnvelope(
+        MemoryPoolIdentity("heap", "HEAP"),
+        MemoryUsageEvidence(10L, 20L, -1L),
+        MemoryUsageEvidence(15L, 30L, 40L),
+        MemoryUsageEvidence(20L, 25L, 50L))),
       campaignBinding = Some(CampaignBinding(
         "host-a:run-01",
         9,

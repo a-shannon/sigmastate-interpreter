@@ -17,9 +17,9 @@ import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport._
   * or production-runtime role.
   */
 private[benchmark] object Eip0045CampaignContract {
-  final val ManifestSchema: String = "eip-0045-b5-campaign-manifest-v2"
+  final val ManifestSchema: String = "eip-0045-b5-campaign-manifest-v3"
   final val ManifestCanonicalization: String =
-    "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v2"
+    "utf8-fixed-field-order-no-internal-whitespace-single-terminal-lf-v3"
   final val ArchiveIndexSchema: String =
     "eip-0045-b5-campaign-archive-index-v1"
   final val ArchiveIndexCanonicalization: String =
@@ -53,7 +53,8 @@ private[benchmark] object Eip0045CampaignContract {
       percentileMethod: String,
       timedScope: String,
       allocationScope: String,
-      garbageCollectionScope: String)
+      garbageCollectionScope: String,
+      memoryPoolScope: String)
 
   final case class ScenarioPolicy(
       id: String,
@@ -78,6 +79,7 @@ private[benchmark] object Eip0045CampaignContract {
       maxHeapBytes: Long,
       jitCompiler: String,
       garbageCollectors: Vector[String],
+      memoryPoolIdentities: Vector[MemoryPoolIdentity],
       threadAllocationMeter: String,
       cpuModel: String,
       cpuModelSource: String)
@@ -98,7 +100,7 @@ private[benchmark] object Eip0045CampaignContract {
       cellId: String,
       replicate: Int)
 
-  final case class CampaignManifestV2(
+  final case class CampaignManifestV3(
       campaignId: String,
       profileId: String,
       implementationRevision: String,
@@ -117,7 +119,7 @@ private[benchmark] object Eip0045CampaignContract {
     * parser and SHA-256 calculation consume the same defensive copy.
     */
   final case class ExactCampaignManifest private (
-      manifest: CampaignManifestV2,
+      manifest: CampaignManifestV3,
       byteLength: Int,
       sha256: String)
 
@@ -151,7 +153,8 @@ private[benchmark] object Eip0045CampaignContract {
     "nearest-rank",
     "Risc0RawSealVerifier.verify; fixture and profile loading excluded",
     "current benchmark thread around each timed verifier invocation",
-    "process-wide collector deltas across the complete sampling phase")
+    "process-wide collector deltas across the complete sampling phase",
+    "sequential per-pool MemoryPoolMXBean.resetPeakUsage/getPeakUsage/getUsage boundary calls around the complete sampling phase; runner and JVM-management overhead included")
 
   val ExpectedResources: Vector[ResourceMetadata] = Vector(
     ResourceMetadata(
@@ -256,7 +259,9 @@ private[benchmark] object Eip0045CampaignContract {
     "Profile loading, ErgoTree preflight, transaction parsing, and node admission are outside the timed and allocation scope.",
     "Allocation samples cover only the current benchmark thread; process-wide or native allocations are outside their scope.",
     "Garbage-collector deltas are process-wide observations and cannot be attributed to one scenario.",
-    "Peak live memory and the complete GC pause/resource envelope are not measured and remain separate B5 obligations.",
+    "Memory-pool phase envelopes are JVM MXBean observations; they do not measure native memory, prove object liveness, attribute a peak to one scenario, or bound a node process.",
+    "Campaign memory-pool evidence requires a dedicated JVM with no other benchmark, Java agent, or JMX client resetting pool peaks.",
+    "Pre-reset and post-sampling topology checks do not detect transient topology changes or a non-inverting external peak reset.",
     "The JVM input-argument digest binds ordered RuntimeMXBean strings but does not disclose or interpret them.",
     "CPU scheduling, frequency scaling, thermal state, and concurrent host load are not controlled by the harness.",
     "Validation boundaries and last verifier checkpoints are probe-only observations; they are not operation counts, cost bounds, or timed-path measurements.",
@@ -276,7 +281,7 @@ private[benchmark] object Eip0045CampaignContract {
   private[benchmark] final class DecodeFailure(message: String)
       extends IllegalArgumentException(message)
 
-  def renderManifest(manifest: CampaignManifestV2): Either[String, String] =
+  def renderManifest(manifest: CampaignManifestV3): Either[String, String] =
     validateManifest(manifest) match {
       case Left(detail) => Left(detail)
       case Right(_) =>
@@ -293,7 +298,7 @@ private[benchmark] object Eip0045CampaignContract {
         }
     }
 
-  def parseManifest(bytes: Array[Byte]): Either[String, CampaignManifestV2] = {
+  def parseManifest(bytes: Array[Byte]): Either[String, CampaignManifestV3] = {
     parseDocument(bytes, MaxCampaignManifestBytes, "campaign manifest") match {
       case Left(detail) => Left(detail)
       case Right((text, root)) =>
@@ -400,7 +405,7 @@ private[benchmark] object Eip0045CampaignContract {
       CampaignBinding(run.id, exact.byteLength, exact.sha256)))
   }
 
-  def validateManifest(manifest: CampaignManifestV2): Either[String, Unit] = {
+  def validateManifest(manifest: CampaignManifestV3): Either[String, Unit] = {
     if (manifest == null) return Left("campaign manifest is null")
     if (!isPublicId(manifest.campaignId)) return Left("campaign ID is invalid")
     if (manifest.profileId != ExpectedProfileId)
@@ -418,7 +423,7 @@ private[benchmark] object Eip0045CampaignContract {
     if (manifest.verifierEntryPoint != ExpectedVerifierEntryPoint)
       return Left("campaign verifier entry point is invalid")
     if (manifest.evidenceContract != ExpectedEvidenceContract)
-      return Left("campaign V4 evidence contract is invalid")
+      return Left("campaign V5 evidence contract is invalid")
     if (manifest.resources != ExpectedResources)
       return Left("campaign resources do not match the frozen benchmark resources")
     if (manifest.warmupRounds < 0 || manifest.warmupRounds > MaxWarmupRounds)
@@ -653,6 +658,10 @@ private[benchmark] object Eip0045CampaignContract {
         policy.garbageCollectors.distinct.length != policy.garbageCollectors.length ||
         policy.garbageCollectors != policy.garbageCollectors.sorted)
       return Left("campaign garbage collector policy is invalid")
+    validateMemoryPoolIdentities(policy.memoryPoolIdentities) match {
+      case Left(_) => return Left("campaign memory pool identity policy is invalid")
+      case Right(_) =>
+    }
     Right(())
   }
 
@@ -674,6 +683,7 @@ private[benchmark] object Eip0045CampaignContract {
       actual.maxHeapBytes == expected.maxHeapBytes &&
       actual.jitCompiler == expected.jitCompiler &&
       actual.garbageCollectors == expected.garbageCollectors &&
+      actual.memoryPoolIdentities == expected.memoryPoolIdentities &&
       actual.threadAllocationMeter == expected.threadAllocationMeter &&
       actual.cpuModel == expected.cpuModel &&
       actual.cpuModelSource == expected.cpuModelSource
@@ -706,7 +716,7 @@ private[benchmark] object Eip0045CampaignContract {
     values != null && values.nonEmpty && values.forall(isPublicId) &&
       values == values.sorted && values.distinct.length == values.length
 
-  private def renderManifestUnchecked(manifest: CampaignManifestV2): String = {
+  private def renderManifestUnchecked(manifest: CampaignManifestV3): String = {
     val out = new StringBuilder(8192)
     out.append('{')
     stringField(out, "schema", ManifestSchema)
@@ -789,6 +799,7 @@ private[benchmark] object Eip0045CampaignContract {
     comma(out); stringField(out, "timedScope", contract.timedScope)
     comma(out); stringField(out, "allocationScope", contract.allocationScope)
     comma(out); stringField(out, "garbageCollectionScope", contract.garbageCollectionScope)
+    comma(out); stringField(out, "memoryPoolScope", contract.memoryPoolScope)
     out.append('}')
   }
 
@@ -812,6 +823,13 @@ private[benchmark] object Eip0045CampaignContract {
     comma(out); stringField(out, "jitCompiler", policy.jitCompiler)
     comma(out); out.append(quote("garbageCollectors")).append(':')
     renderStringArray(out, policy.garbageCollectors)
+    comma(out); out.append(quote("memoryPoolIdentities")).append(':')
+    renderArray(out, policy.memoryPoolIdentities) { (builder, identity) =>
+      builder.append('{')
+      stringField(builder, "name", identity.name)
+      comma(builder); stringField(builder, "memoryType", identity.memoryType)
+      builder.append('}')
+    }
     comma(out); stringField(out, "threadAllocationMeter", policy.threadAllocationMeter)
     comma(out); stringField(out, "cpuModel", policy.cpuModel)
     comma(out); stringField(out, "cpuModelSource", policy.cpuModelSource)
@@ -840,7 +858,7 @@ private[benchmark] object Eip0045CampaignContract {
     out.toString()
   }
 
-  private def decodeManifest(root: JsonValue): CampaignManifestV2 = {
+  private def decodeManifest(root: JsonValue): CampaignManifestV3 = {
     val fields = exactObject(root, Vector(
       "schema",
       "canonicalization",
@@ -872,7 +890,8 @@ private[benchmark] object Eip0045CampaignContract {
       "percentileMethod",
       "timedScope",
       "allocationScope",
-      "garbageCollectionScope"), "campaign evidence contract")
+      "garbageCollectionScope",
+      "memoryPoolScope"), "campaign evidence contract")
     val contract = EvidenceContract(
       requireString(contractFields("schema"), "evidence schema"),
       requireString(contractFields("digestAlgorithm"), "evidence digest algorithm"),
@@ -883,7 +902,8 @@ private[benchmark] object Eip0045CampaignContract {
       requireString(contractFields("percentileMethod"), "evidence percentile method"),
       requireString(contractFields("timedScope"), "evidence timed scope"),
       requireString(contractFields("allocationScope"), "evidence allocation scope"),
-      requireString(contractFields("garbageCollectionScope"), "evidence GC scope"))
+      requireString(contractFields("garbageCollectionScope"), "evidence GC scope"),
+      requireString(contractFields("memoryPoolScope"), "evidence memory pool scope"))
 
     val resources = requireArray(fields("resources"), "campaign resources").map { value =>
       val item = exactObject(value, Vector("id", "classpath", "byteLength", "sha256"),
@@ -941,7 +961,7 @@ private[benchmark] object Eip0045CampaignContract {
         requireString(item("cellId"), "run cell ID"),
         requireInt(item("replicate"), "run replicate"))
     }
-    CampaignManifestV2(
+    CampaignManifestV3(
       requireString(fields("campaignId"), "campaign ID"),
       requireString(fields("profileId"), "campaign profile ID"),
       requireString(fields("implementationRevision"), "implementation revision"),
@@ -974,6 +994,7 @@ private[benchmark] object Eip0045CampaignContract {
       "maxHeapBytes",
       "jitCompiler",
       "garbageCollectors",
+      "memoryPoolIdentities",
       "threadAllocationMeter",
       "cpuModel",
       "cpuModelSource"), "campaign environment policy")
@@ -993,6 +1014,15 @@ private[benchmark] object Eip0045CampaignContract {
       requireLong(item("maxHeapBytes"), "maximum heap bytes"),
       requireString(item("jitCompiler"), "JIT compiler"),
       requireStringArray(item("garbageCollectors"), "garbage collectors"),
+      requireArray(item("memoryPoolIdentities"), "memory pool identities").map { value =>
+        val identity = exactObject(
+          value,
+          Vector("name", "memoryType"),
+          "memory pool identity")
+        MemoryPoolIdentity(
+          requireString(identity("name"), "memory pool name"),
+          requireString(identity("memoryType"), "memory pool type"))
+      },
       requireString(item("threadAllocationMeter"), "thread allocation meter"),
       requireString(item("cpuModel"), "CPU model"),
       requireString(item("cpuModelSource"), "CPU model source"))
