@@ -34,6 +34,22 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
   private val TaggedStructDigestBuilt = "tagged-struct-digest-built"
   private val OkClaimBuilt = "ok-claim-built"
   private val RawVerifierEntered = "raw-verifier-entered"
+  private val ProfileIdEvaluated = "profile-id-evaluated"
+  private val DispatchCharged = "dispatch-charged"
+  private val ProfileIdValidated = "profile-id-validated"
+  private val ProfileIdMaterialized = "profile-id-materialized"
+  private val ByteCompared = "byte-compared"
+  private val EntryCompared = "entry-compared"
+  private val LookupCompleted = "lookup-completed"
+  private val ActiveLifecycleSelected = "active-lifecycle-selected"
+  private val FixedCharged = "fixed-charged"
+  private val ProgramIdEvaluated = "program-id-evaluated"
+  private val ProgramIdValidated = "program-id-validated"
+  private val ApplicationPayloadEvaluated = "application-payload-evaluated"
+  private val ApplicationPayloadValidated = "application-payload-validated"
+  private val ProofChunksEvaluated = "proof-chunks-evaluated"
+  private val ProofChunkCountValidated = "proof-chunk-count-validated"
+  private val ProofChunkValidated = "proof-chunk-validated"
 
   private val CanonicalPreVerifierEvents = Vector(
     ProofChunkMaterialized,
@@ -52,22 +68,70 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     OkClaimBuilt,
     RawVerifierEntered)
 
-  private final class RecordingObserver extends StarkPreVerifierObserver {
+  private val CanonicalRoutePrefix =
+    Vector(
+      ProfileIdEvaluated,
+      DispatchCharged,
+      ProfileIdValidated,
+      ProfileIdMaterialized) ++
+      Vector.fill(ProfileIdBytes)(ByteCompared) ++
+      Vector(
+        EntryCompared,
+        LookupCompleted,
+        ActiveLifecycleSelected,
+        FixedCharged,
+        ProgramIdEvaluated,
+        ProgramIdValidated,
+        ApplicationPayloadEvaluated,
+        ApplicationPayloadValidated,
+        ProofChunksEvaluated,
+        ProofChunkCountValidated) ++
+      Vector.fill(RawSealV1Decoder.canonicalChunkLengths.length)(ProofChunkValidated)
+
+  private val CanonicalRouteEvents =
+    CanonicalRoutePrefix ++ CanonicalPreVerifierEvents
+
+  private class RecordingObserver extends StarkPreVerifierObserver {
     private val recorded = scala.collection.mutable.ArrayBuffer.empty[String]
     def events: Vector[String] = recorded.toVector
 
-    override def onProofChunkMaterialized(): Unit = recorded += ProofChunkMaterialized
-    override def onProgramIdMaterialized(): Unit = recorded += ProgramIdMaterialized
+    protected final def record(event: String): Unit = recorded += event
+
+    override def onProofChunkMaterialized(): Unit = record(ProofChunkMaterialized)
+    override def onProgramIdMaterialized(): Unit = record(ProgramIdMaterialized)
     override def onApplicationPayloadMaterialized(): Unit =
-      recorded += ApplicationPayloadMaterialized
+      record(ApplicationPayloadMaterialized)
     override def onSelfPropositionBytesMaterialized(): Unit =
-      recorded += SelfPropositionBytesMaterialized
-    override def onContractIdBuilt(): Unit = recorded += ContractIdBuilt
-    override def onStatementBuilt(): Unit = recorded += StatementBuilt
-    override def onJournalDigestBuilt(): Unit = recorded += JournalDigestBuilt
-    override def onTaggedStructDigestBuilt(): Unit = recorded += TaggedStructDigestBuilt
-    override def onOkClaimBuilt(): Unit = recorded += OkClaimBuilt
-    override def onRawVerifierEntered(): Unit = recorded += RawVerifierEntered
+      record(SelfPropositionBytesMaterialized)
+    override def onContractIdBuilt(): Unit = record(ContractIdBuilt)
+    override def onStatementBuilt(): Unit = record(StatementBuilt)
+    override def onJournalDigestBuilt(): Unit = record(JournalDigestBuilt)
+    override def onTaggedStructDigestBuilt(): Unit = record(TaggedStructDigestBuilt)
+    override def onOkClaimBuilt(): Unit = record(OkClaimBuilt)
+    override def onRawVerifierEntered(): Unit = record(RawVerifierEntered)
+  }
+
+  private final class RecordingRouteObserver
+      extends RecordingObserver with VerifyStarkEvaluationObserver {
+    override def onProfileIdEvaluated(): Unit = record(ProfileIdEvaluated)
+    override def onDispatchCharged(): Unit = record(DispatchCharged)
+    override def onProfileIdValidated(): Unit = record(ProfileIdValidated)
+    override def onProfileIdMaterialized(): Unit = record(ProfileIdMaterialized)
+    override def onByteComparison(): Unit = record(ByteCompared)
+    override def onEntryComparison(): Unit = record(EntryCompared)
+    override def onLookupCompleted(): Unit = record(LookupCompleted)
+    override def onActiveLifecycleSelected(): Unit = record(ActiveLifecycleSelected)
+    override def onFixedCharged(): Unit = record(FixedCharged)
+    override def onProgramIdEvaluated(): Unit = record(ProgramIdEvaluated)
+    override def onProgramIdValidated(): Unit = record(ProgramIdValidated)
+    override def onApplicationPayloadEvaluated(): Unit =
+      record(ApplicationPayloadEvaluated)
+    override def onApplicationPayloadValidated(): Unit =
+      record(ApplicationPayloadValidated)
+    override def onProofChunksEvaluated(): Unit = record(ProofChunksEvaluated)
+    override def onProofChunkCountValidated(): Unit =
+      record(ProofChunkCountValidated)
+    override def onProofChunkValidated(): Unit = record(ProofChunkValidated)
   }
 
   private final class ObserverSentinel extends RuntimeException
@@ -362,7 +426,7 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
       (DispatchSentinel + FixedSentinel)
   }
 
-  test("canonical active path freezes the complete pre-verifier operation sequence") {
+  test("canonical active path joins route and pre-verifier operation sequences") {
     val proof = canonicalChunks(rawSeal)
     val directEvaluator = evaluator()
     val contractId = ProfileBlake2b256.hash(
@@ -377,24 +441,49 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     observed._1 shouldBe false
     observed shouldBe unobserved
     observer.events shouldBe CanonicalPreVerifierEvents
+
+    val routeObserver = new RecordingRouteObserver
+    val routeObserved = evaluateWithCost(node(proof), routeObserver)
+    routeObserved shouldBe unobserved
+    routeObserver.events shouldBe CanonicalRouteEvents
   }
 
-  test("every program payload and proof shape guard precedes all pre-verifier events") {
+  test("every program payload and proof shape guard freezes its route prefix") {
     val proof = canonicalChunks(rawSeal)
-    val shortFirstChunk = proof.map(_.clone())
-    shortFirstChunk(0) = java.util.Arrays.copyOf(
-      shortFirstChunk(0),
-      shortFirstChunk(0).length - 1)
     val missingLastChunk = proof.take(proof.length - 1)
     val oversizedPayload = new Array[Byte](loadedProfile.maxApplicationPayloadBytes + 1)
     val shortProgramId = java.util.Arrays.copyOf(ProgramId, ProgramId.length - 1)
-    val cases = Vector(
-      "short-program-id" -> node(proof, programId = shortProgramId),
-      "oversized-payload" -> node(proof, payload = oversizedPayload),
-      "missing-last-chunk" -> node(missingLastChunk),
-      "short-first-chunk" -> node(shortFirstChunk))
+    val throughFixed = CanonicalRoutePrefix.takeWhile(_ != ProgramIdEvaluated)
+    val throughProgramValidation =
+      throughFixed ++ Vector(ProgramIdEvaluated, ProgramIdValidated)
+    val throughPayloadValidation =
+      throughProgramValidation ++
+        Vector(ApplicationPayloadEvaluated, ApplicationPayloadValidated)
+    val throughProofCountValidation =
+      throughPayloadValidation ++
+        Vector(ProofChunksEvaluated, ProofChunkCountValidated)
+    val baseCases = Vector(
+      ("short-program-id",
+        node(proof, programId = shortProgramId),
+        throughFixed :+ ProgramIdEvaluated),
+      ("oversized-payload",
+        node(proof, payload = oversizedPayload),
+        throughProgramValidation :+ ApplicationPayloadEvaluated),
+      ("missing-last-chunk",
+        node(missingLastChunk),
+        throughPayloadValidation :+ ProofChunksEvaluated))
+    val chunkCases = proof.indices.map { index =>
+      val shortened = proof.map(_.clone())
+      shortened(index) = java.util.Arrays.copyOf(
+        shortened(index),
+        shortened(index).length - 1)
+      ("short-chunk-" + index,
+        node(shortened),
+        throughProofCountValidation ++ Vector.fill(index)(ProofChunkValidated))
+    }
+    val cases = baseCases ++ chunkCases
 
-    cases.foreach { case (label, value) =>
+    cases.foreach { case (label, value, expectedRouteEvents) =>
       withClue(label + ": ") {
         val observer = new RecordingObserver
         val observed = evaluateWithCost(value, observer)
@@ -402,6 +491,11 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
         observed._1 shouldBe false
         observed shouldBe unobserved
         observer.events shouldBe empty
+
+        val routeObserver = new RecordingRouteObserver
+        val routeObserved = evaluateWithCost(value, routeObserver)
+        routeObserved shouldBe unobserved
+        routeObserver.events shouldBe expectedRouteEvents
       }
     }
   }
@@ -421,6 +515,7 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
 
   test("observer seam preserves legacy descriptors and retains no observer state") {
     val observerClass = classOf[StarkPreVerifierObserver]
+    val routeObserverClass = classOf[VerifyStarkEvaluationObserver]
     val threadLocalClass = Class.forName("java.lang.ThreadLocal")
     observerClass.getDeclaredFields.toSeq shouldBe empty
     observerClass.getDeclaredMethods.map(_.getName).toSet shouldBe Set(
@@ -435,6 +530,26 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
       "onOkClaimBuilt",
       "onRawVerifierEntered")
     observerClass.getDeclaredMethods.foreach { method =>
+      method.getParameterTypes.toSeq shouldBe empty
+      method.getReturnType shouldBe java.lang.Void.TYPE
+    }
+    routeObserverClass.getDeclaredFields.toSeq shouldBe empty
+    routeObserverClass.getDeclaredMethods.map(_.getName).toSet shouldBe Set(
+      "onProfileIdEvaluated",
+      "onDispatchCharged",
+      "onProfileIdValidated",
+      "onProfileIdMaterialized",
+      "onLookupCompleted",
+      "onActiveLifecycleSelected",
+      "onFixedCharged",
+      "onProgramIdEvaluated",
+      "onProgramIdValidated",
+      "onApplicationPayloadEvaluated",
+      "onApplicationPayloadValidated",
+      "onProofChunksEvaluated",
+      "onProofChunkCountValidated",
+      "onProofChunkValidated")
+    routeObserverClass.getDeclaredMethods.foreach { method =>
       method.getParameterTypes.toSeq shouldBe empty
       method.getReturnType shouldBe java.lang.Void.TYPE
     }
@@ -458,6 +573,11 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     val legacyEval = classOf[VerifyStark].getDeclaredMethods.filter(_.getName == "eval")
     legacyEval should have length 1
     legacyEval.head.getParameterTypes should have length 2
+    val observedEval = classOf[VerifyStark].getDeclaredMethods
+      .filter(_.getName == "evalObserved")
+    observedEval should have length 1
+    observedEval.head.getParameterTypes should have length 3
+    observedEval.head.getParameterTypes.apply(1) shouldBe observerClass
 
     val runtimeVerify = classOf[StarkProfileRuntime].getDeclaredMethods
       .filter(_.getName == "verify")
@@ -485,6 +605,8 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     }
     an[ClassNotFoundException] shouldBe thrownBy(
       Class.forName("sigma.stark.profile.StarkPreVerifierObserver$"))
+    an[ClassNotFoundException] shouldBe thrownBy(
+      Class.forName("sigma.ast.VerifyStarkEvaluationObserver$"))
   }
 
   test("legacy runtime shape needs only the historical verify method") {
@@ -508,5 +630,14 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     legacyRuntime.verifyCalls shouldBe 2
     legacyRuntime.lastContractId should contain theSameElementsInOrderAs expectedContractId
     observer.events shouldBe CanonicalPreVerifierEvents.take(8)
+
+    val routeObserver = new RecordingRouteObserver
+    evalObserved(
+      evaluatorFor(capabilityFor(legacyRuntime)),
+      node(proof),
+      routeObserver) shouldBe false
+    legacyRuntime.verifyCalls shouldBe 3
+    routeObserver.events shouldBe
+      (CanonicalRoutePrefix ++ CanonicalPreVerifierEvents.take(8))
   }
 }

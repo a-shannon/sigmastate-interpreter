@@ -4,12 +4,35 @@ import sigma.Coll
 import sigma.ast.SCollection.SByteArray
 import sigma.eval.ErgoTreeEvaluator
 import sigma.eval.ErgoTreeEvaluator.DataEnv
-import sigma.eval.StarkVerificationCapability.{ActiveLifecycle, QuarantinedLifecycle, Snapshot, Unavailable}
+import sigma.eval.StarkVerificationCapability.{ActiveLifecycle, DispatchLookupObserver, QuarantinedLifecycle, Snapshot, Unavailable}
 import sigma.eval.ObservedStarkProfileRuntime
 import sigma.exceptions.{OpcodeUnavailableException, StarkProfileQuarantinedException}
 import sigma.serialization.OpCodes
 import sigma.serialization.ValueCodes.OpCode
 import sigma.stark.profile.{ProfileBlake2b256, StarkPreVerifierObserver}
+
+/** Package-bounded, payload-free observer for the complete evaluator route.
+  * It composes the existing dispatch and post-guard observers without adding
+  * state to the opcode, capability or runtime. Production evaluation passes
+  * `null`; observer exceptions intentionally propagate.
+  */
+private[sigma] trait VerifyStarkEvaluationObserver
+    extends StarkPreVerifierObserver with DispatchLookupObserver {
+  def onProfileIdEvaluated(): Unit
+  def onDispatchCharged(): Unit
+  def onProfileIdValidated(): Unit
+  def onProfileIdMaterialized(): Unit
+  def onLookupCompleted(): Unit
+  def onActiveLifecycleSelected(): Unit
+  def onFixedCharged(): Unit
+  def onProgramIdEvaluated(): Unit
+  def onProgramIdValidated(): Unit
+  def onApplicationPayloadEvaluated(): Unit
+  def onApplicationPayloadValidated(): Unit
+  def onProofChunksEvaluated(): Unit
+  def onProofChunkCountValidated(): Unit
+  def onProofChunkValidated(): Unit
+}
 
 /**
  * Native STARK proof verifier node (EIP-0045).
@@ -36,17 +59,24 @@ case class VerifyStark(
   override def opType: SFunc = VerifyStark.OpType
 
   protected final override def eval(env: DataEnv)(implicit E: ErgoTreeEvaluator): Any =
-    evalImpl(env, null)
+    evalImpl(env, null, null)
 
   /** Validation-only route through the exact production evaluator body. */
   private[sigma] final def evalObserved(
       env: DataEnv,
-      observer: StarkPreVerifierObserver)(implicit E: ErgoTreeEvaluator): Any =
-    evalImpl(env, observer)
+      observer: StarkPreVerifierObserver)(implicit E: ErgoTreeEvaluator): Any = {
+    val evaluationObserver = observer match {
+      case value: VerifyStarkEvaluationObserver => value
+      case _                                    => null
+    }
+    evalImpl(env, observer, evaluationObserver)
+  }
 
   private def evalImpl(
       env: DataEnv,
-      observer: StarkPreVerifierObserver)(implicit E: ErgoTreeEvaluator): Any = {
+      observer: StarkPreVerifierObserver,
+      evaluationObserver: VerifyStarkEvaluationObserver)(
+      implicit E: ErgoTreeEvaluator): Any = {
     // Opcode availability is first enforced by the whole-input preflight.
     // This evaluator guard is defense in depth and deliberately precedes every
     // child so no direct evaluator entry can make unavailable code true under
@@ -61,11 +91,19 @@ case class VerifyStark(
         // Normal invocation order begins here: profileId is the only script
         // child evaluated before trusted dispatch and lifecycle resolution.
         val evaluatedProfileId = profileId.evalTo[Coll[Byte]](env)
+        if (evaluationObserver ne null) evaluationObserver.onProfileIdEvaluated()
         E.addCost(FixedCost(snapshot.dispatchJit), VerifyStark.opDesc)
+        if (evaluationObserver ne null) evaluationObserver.onDispatchCharged()
         if (evaluatedProfileId.length != VerifyStark.DigestBytes) return false
+        if (evaluationObserver ne null) evaluationObserver.onProfileIdValidated()
 
         val selectedProfileId = evaluatedProfileId.toArray
-        snapshot.lookup(selectedProfileId) match {
+        if (evaluationObserver ne null) evaluationObserver.onProfileIdMaterialized()
+        val selectedEntry =
+          if (evaluationObserver eq null) snapshot.lookup(selectedProfileId)
+          else snapshot.lookupObserved(selectedProfileId, evaluationObserver)
+        if (evaluationObserver ne null) evaluationObserver.onLookupCompleted()
+        selectedEntry match {
           case None => false
 
           case Some(entry) => entry.lifecycle match {
@@ -76,23 +114,37 @@ case class VerifyStark(
                 "STARK profile " + idHex + " is quarantined")
 
             case active: ActiveLifecycle =>
+              if (evaluationObserver ne null)
+                evaluationObserver.onActiveLifecycleSelected()
               // The complete profile charge precedes every heavy child,
               // transport allocation, statement hash and verifier operation.
               E.addCost(FixedCost(active.fixedJit), VerifyStark.opDesc)
+              if (evaluationObserver ne null) evaluationObserver.onFixedCharged()
 
               val evaluatedProgramId = programId.evalTo[Coll[Byte]](env)
+              if (evaluationObserver ne null) evaluationObserver.onProgramIdEvaluated()
               if (evaluatedProgramId.length != VerifyStark.DigestBytes) return false
+              if (evaluationObserver ne null) evaluationObserver.onProgramIdValidated()
 
               val evaluatedPayload = applicationPayload.evalTo[Coll[Byte]](env)
+              if (evaluationObserver ne null)
+                evaluationObserver.onApplicationPayloadEvaluated()
               if (evaluatedPayload.length > active.maxApplicationPayloadBytes) return false
+              if (evaluationObserver ne null)
+                evaluationObserver.onApplicationPayloadValidated()
 
               val evaluatedChunks = proofChunks.evalTo[Coll[Coll[Byte]]](env)
+              if (evaluationObserver ne null) evaluationObserver.onProofChunksEvaluated()
               val expectedChunkLengths = active.canonicalProofChunkLengths
               if (evaluatedChunks.length != expectedChunkLengths.length) return false
+              if (evaluationObserver ne null)
+                evaluationObserver.onProofChunkCountValidated()
 
               var i = 0
               while (i < expectedChunkLengths.length) {
                 if (evaluatedChunks(i).length != expectedChunkLengths(i)) return false
+                if (evaluationObserver ne null)
+                  evaluationObserver.onProofChunkValidated()
                 i += 1
               }
 

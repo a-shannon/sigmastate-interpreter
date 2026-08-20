@@ -316,6 +316,44 @@ allocation, node admission or the full transaction path. The 16-by-32 bound is
 a bound on compared positions, so the path can read up to 1,024 array bytes
 across both IDs. It is not a consensus charge and does not close B5.
 
+## Integrated evaluator-route census
+
+The stock-runtime negative-path fixture also composes the dispatch and
+pre-verifier observers through `VerifyStark`. Its canonical one-entry Active
+snapshot records a 50-event evaluator prefix before the existing 15-event
+pre-verifier sequence. In order, the prefix contains profile-ID evaluation,
+the successful dispatch charge, profile-ID validation and materialization, 32
+byte comparisons and one entry comparison, lookup completion, Active lifecycle
+selection, the successful fixed charge, program-ID evaluation and validation,
+payload evaluation and validation, proof-child evaluation, proof-chunk-count
+validation and four successful chunk validations. The joined vector therefore
+contains 65 events before the raw verifier returns the exact typed
+`ClaimMismatch`.
+
+Branch fixtures freeze the earlier prefixes. Unavailable evaluation records
+nothing; a failed dispatch charge records only profile-ID evaluation; a
+malformed profile ID stops after the dispatch charge. Absent and quarantined
+profiles stop after their completed lookups, a failed fixed charge stops after
+Active selection, and a heavy-child exception stops after the fixed charge.
+Program, payload, chunk-count and each individual chunk guard likewise stop at
+the last successful operation. Ordinary and observed calls retain the same
+verdict and JIT delta, and callback exceptions propagate with object identity.
+
+The composite observer is package-bounded, payload-free and passed only by
+method parameter. A plain pre-verifier observer remains supported. Production
+evaluation passes no observer and allocates no observer adapter; it uses the
+historical lookup and runtime routes directly. No field, global,
+`ThreadLocal`, default argument or public descriptor is added. The separate
+65,535-entry dispatch fixture remains the authority for the lookup bound and
+is not repeated here.
+
+The 65-event vector belongs to this one-entry, four-chunk negative fixture; it
+is not a global maximum or a cost schedule. The census records source-level
+control flow, not allocation, elapsed time, JVM instructions, native work,
+node admission or the complete transaction preflight. It supplies no matching
+stock receipt, positive evaluator result, multi-host campaign or authority to
+close B4 or B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process

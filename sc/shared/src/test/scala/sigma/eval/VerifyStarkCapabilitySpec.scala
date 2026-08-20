@@ -11,7 +11,7 @@ import sigma.data.TrivialProp
 import sigma.exceptions.{CostLimitException, InterpreterException, OpcodeUnavailableException, StarkOpcodeErgoTreeVersionException, StarkProfileQuarantinedException}
 import sigma.interpreter.ContextExtension
 import sigma.serialization.ValueSerializer
-import sigma.stark.profile.ProfileBlake2b256
+import sigma.stark.profile.{ProfileBlake2b256, StarkPreVerifierObserver}
 import sigma.validation.{ValidationException, ValidationRules}
 import sigmastate.helpers.{ErgoLikeContextTesting, ErgoLikeTestInterpreter}
 import sigmastate.helpers.TestingHelpers.createBox
@@ -24,6 +24,92 @@ class VerifyStarkCapabilitySpec extends AnyFunSuite with Matchers {
 
   private val ChainDomainId = Array.tabulate[Byte](ProfileIdBytes)(_.toByte)
   private val interpreter = new ErgoLikeTestInterpreter
+
+  private val ProfileIdEvaluated = "profile-id-evaluated"
+  private val DispatchCharged = "dispatch-charged"
+  private val ProfileIdValidated = "profile-id-validated"
+  private val ProfileIdMaterialized = "profile-id-materialized"
+  private val ByteCompared = "byte-compared"
+  private val EntryCompared = "entry-compared"
+  private val LookupCompleted = "lookup-completed"
+  private val ActiveLifecycleSelected = "active-lifecycle-selected"
+  private val FixedCharged = "fixed-charged"
+  private val ProgramIdEvaluated = "program-id-evaluated"
+  private val ProgramIdValidated = "program-id-validated"
+  private val ApplicationPayloadEvaluated = "application-payload-evaluated"
+  private val ApplicationPayloadValidated = "application-payload-validated"
+  private val ProofChunksEvaluated = "proof-chunks-evaluated"
+  private val ProofChunkCountValidated = "proof-chunk-count-validated"
+  private val ProofChunkValidated = "proof-chunk-validated"
+
+  private val EqualLookupEvents =
+    Vector.fill(ProfileIdBytes)(ByteCompared) :+ EntryCompared
+  private val ThroughActiveSelection =
+    Vector(
+      ProfileIdEvaluated,
+      DispatchCharged,
+      ProfileIdValidated,
+      ProfileIdMaterialized) ++
+      EqualLookupEvents ++
+      Vector(LookupCompleted, ActiveLifecycleSelected)
+  private val ThroughFixedCharge = ThroughActiveSelection :+ FixedCharged
+  private val ThroughProgramValidation =
+    ThroughFixedCharge ++ Vector(ProgramIdEvaluated, ProgramIdValidated)
+  private val ThroughPayloadValidation =
+    ThroughProgramValidation ++
+      Vector(ApplicationPayloadEvaluated, ApplicationPayloadValidated)
+  private val ThroughProofCountValidation =
+    ThroughPayloadValidation ++
+      Vector(ProofChunksEvaluated, ProofChunkCountValidated)
+
+  private class RecordingRouteObserver extends VerifyStarkEvaluationObserver {
+    private val recorded = scala.collection.mutable.ArrayBuffer.empty[String]
+    def events: Vector[String] = recorded.toVector
+
+    protected def observe(event: String): Unit = recorded += event
+
+    override def onProfileIdEvaluated(): Unit = observe(ProfileIdEvaluated)
+    override def onDispatchCharged(): Unit = observe(DispatchCharged)
+    override def onProfileIdValidated(): Unit = observe(ProfileIdValidated)
+    override def onProfileIdMaterialized(): Unit = observe(ProfileIdMaterialized)
+    override def onByteComparison(): Unit = observe(ByteCompared)
+    override def onEntryComparison(): Unit = observe(EntryCompared)
+    override def onLookupCompleted(): Unit = observe(LookupCompleted)
+    override def onActiveLifecycleSelected(): Unit = observe(ActiveLifecycleSelected)
+    override def onFixedCharged(): Unit = observe(FixedCharged)
+    override def onProgramIdEvaluated(): Unit = observe(ProgramIdEvaluated)
+    override def onProgramIdValidated(): Unit = observe(ProgramIdValidated)
+    override def onApplicationPayloadEvaluated(): Unit =
+      observe(ApplicationPayloadEvaluated)
+    override def onApplicationPayloadValidated(): Unit =
+      observe(ApplicationPayloadValidated)
+    override def onProofChunksEvaluated(): Unit = observe(ProofChunksEvaluated)
+    override def onProofChunkCountValidated(): Unit =
+      observe(ProofChunkCountValidated)
+    override def onProofChunkValidated(): Unit = observe(ProofChunkValidated)
+    override def onProofChunkMaterialized(): Unit = observe("proof-chunk-materialized")
+    override def onProgramIdMaterialized(): Unit = observe("program-id-materialized")
+    override def onApplicationPayloadMaterialized(): Unit =
+      observe("application-payload-materialized")
+    override def onSelfPropositionBytesMaterialized(): Unit =
+      observe("self-proposition-bytes-materialized")
+    override def onContractIdBuilt(): Unit = observe("contract-id-built")
+    override def onStatementBuilt(): Unit = observe("statement-built")
+    override def onJournalDigestBuilt(): Unit = observe("journal-digest-built")
+    override def onTaggedStructDigestBuilt(): Unit =
+      observe("tagged-struct-digest-built")
+    override def onOkClaimBuilt(): Unit = observe("ok-claim-built")
+    override def onRawVerifierEntered(): Unit = observe("raw-verifier-entered")
+  }
+
+  private final class RouteObserverSentinel extends RuntimeException
+
+  private final class ThrowingRouteObserver(
+      target: String,
+      sentinel: RouteObserverSentinel) extends RecordingRouteObserver {
+    override protected def observe(event: String): Unit =
+      if (event == target) throw sentinel else super.observe(event)
+  }
 
   private final class RecordingRuntime(
       sourceProfileId: Array[Byte],
@@ -109,6 +195,16 @@ class VerifyStarkCapabilitySpec extends AnyFunSuite with Matchers {
       VersionContext.StarkVerificationVersion,
       VersionContext.StarkVerificationVersion) {
       evaluator.eval(Map.empty, node)
+    }
+
+  private def evalObserved(
+      evaluator: CErgoTreeEvaluator,
+      node: VerifyStark,
+      observer: StarkPreVerifierObserver): Any =
+    VersionContext.withVersions(
+      VersionContext.StarkVerificationVersion,
+      VersionContext.StarkVerificationVersion) {
+      node.evalObserved(Map.empty, observer)(evaluator)
     }
 
   private def chunks(values: Array[Byte]*): Value[SCollection[SCollection[SByte.type]]] =
@@ -817,6 +913,170 @@ class VerifyStarkCapabilitySpec extends AnyFunSuite with Matchers {
     secondUse.getMessage shouldBe "STARK preflight result has already been consumed"
     counting.v4DeserializeCalls shouldBe 1
     runtime.calls shouldBe 1
+  }
+
+  test("integrated observer freezes lifecycle and charge prefixes") {
+    val unavailableObserver = new RecordingRouteObserver
+    an[OpcodeUnavailableException] shouldBe thrownBy(
+      evalObserved(
+        evaluator(Unavailable),
+        node(inaccessibleBytes),
+        unavailableObserver))
+    unavailableObserver.events shouldBe empty
+
+    val runtime = new RecordingRuntime(profileId(1))
+    val capability = activeSnapshot(runtime)
+
+    val dispatchObserver = new RecordingRouteObserver
+    a[CostLimitException] shouldBe thrownBy(
+      evalObserved(
+        evaluator(capability, costLimit = JitCost(50)),
+        node(ByteArrayConstant(profileId(1))),
+        dispatchObserver))
+    dispatchObserver.events shouldBe Vector(ProfileIdEvaluated)
+
+    val malformedObserver = new RecordingRouteObserver
+    evalObserved(
+      evaluator(capability),
+      node(ByteArrayConstant(Array[Byte](1))),
+      malformedObserver) shouldBe false
+    malformedObserver.events shouldBe Vector(ProfileIdEvaluated, DispatchCharged)
+
+    val absentObserver = new RecordingRouteObserver
+    evalObserved(
+      evaluator(capability),
+      node(ByteArrayConstant(profileId(2))),
+      absentObserver) shouldBe false
+    absentObserver.events shouldBe Vector(
+      ProfileIdEvaluated,
+      DispatchCharged,
+      ProfileIdValidated,
+      ProfileIdMaterialized,
+      ByteCompared,
+      EntryCompared,
+      LookupCompleted)
+
+    val quarantinedEntry = right(quarantined(profileId(3)))
+    val quarantinedCapability = right(snapshot(
+      ChainDomainId,
+      protocolGeneration = 8,
+      AdmissionValidation,
+      dispatchJit = 100,
+      Vector(quarantinedEntry)))
+    val quarantinedObserver = new RecordingRouteObserver
+    a[StarkProfileQuarantinedException] shouldBe thrownBy(
+      evalObserved(
+        evaluator(quarantinedCapability),
+        node(ByteArrayConstant(profileId(3))),
+        quarantinedObserver))
+    quarantinedObserver.events shouldBe
+      (Vector(
+        ProfileIdEvaluated,
+        DispatchCharged,
+        ProfileIdValidated,
+        ProfileIdMaterialized) ++
+        EqualLookupEvents :+ LookupCompleted)
+
+    val fixedObserver = new RecordingRouteObserver
+    a[CostLimitException] shouldBe thrownBy(
+      evalObserved(
+        evaluator(capability, costLimit = JitCost(150)),
+        node(ByteArrayConstant(profileId(1))),
+        fixedObserver))
+    fixedObserver.events shouldBe ThroughActiveSelection
+
+    val childObserver = new RecordingRouteObserver
+    an[IndexOutOfBoundsException] shouldBe thrownBy(
+      evalObserved(
+        evaluator(capability),
+        node(ByteArrayConstant(profileId(1))),
+        childObserver))
+    childObserver.events shouldBe ThroughFixedCharge
+    runtime.calls shouldBe 0
+  }
+
+  test("integrated observer freezes every active child and proof shape guard") {
+    val runtime = new RecordingRuntime(profileId(1))
+    val capability = activeSnapshot(runtime)
+    val exactProfile = ByteArrayConstant(profileId(1))
+    val exactProgram = ByteArrayConstant(profileId(9))
+    val exactPayload = ByteArrayConstant(Array[Byte](7, 8))
+
+    val cases = Vector(
+      "short-program" -> (
+        node(exactProfile, ByteArrayConstant(Array[Byte](1))) ->
+          (ThroughFixedCharge :+ ProgramIdEvaluated)),
+      "oversized-payload" -> (
+        node(
+          exactProfile,
+          exactProgram,
+          ByteArrayConstant(Array[Byte](1, 2, 3, 4))) ->
+          (ThroughProgramValidation :+ ApplicationPayloadEvaluated)),
+      "wrong-chunk-count" -> (
+        node(
+          exactProfile,
+          exactProgram,
+          exactPayload,
+          chunks(Array[Byte](4))) ->
+          (ThroughPayloadValidation :+ ProofChunksEvaluated)),
+      "wrong-first-chunk" -> (
+        node(
+          exactProfile,
+          exactProgram,
+          exactPayload,
+          chunks(Array.empty[Byte], Array[Byte](5, 6))) ->
+          ThroughProofCountValidation),
+      "wrong-second-chunk" -> (
+        node(
+          exactProfile,
+          exactProgram,
+          exactPayload,
+          chunks(Array[Byte](4), Array[Byte](5))) ->
+          (ThroughProofCountValidation :+ ProofChunkValidated)))
+
+    cases.foreach { case (label, (value, expectedEvents)) =>
+      withClue(label + ": ") {
+        val observer = new RecordingRouteObserver
+        evalObserved(evaluator(capability), value, observer) shouldBe false
+        observer.events shouldBe expectedEvents
+      }
+    }
+    runtime.calls shouldBe 0
+  }
+
+  test("integrated observer exceptions preserve object identity") {
+    val runtime = new RecordingRuntime(profileId(1))
+    val capability = activeSnapshot(runtime)
+    val targets = Vector(
+      ProfileIdEvaluated,
+      DispatchCharged,
+      ProfileIdValidated,
+      ProfileIdMaterialized,
+      ByteCompared,
+      EntryCompared,
+      LookupCompleted,
+      ActiveLifecycleSelected,
+      FixedCharged,
+      ProgramIdEvaluated,
+      ProgramIdValidated,
+      ApplicationPayloadEvaluated,
+      ApplicationPayloadValidated,
+      ProofChunksEvaluated,
+      ProofChunkCountValidated,
+      ProofChunkValidated)
+
+    targets.foreach { target =>
+      withClue(target + ": ") {
+        val sentinel = new RouteObserverSentinel
+        val observed = intercept[RouteObserverSentinel] {
+          evalObserved(
+            evaluator(capability),
+            executableNode(profileId(1)),
+            new ThrowingRouteObserver(target, sentinel))
+        }
+        observed should be theSameInstanceAs sentinel
+      }
+    }
   }
 
   test("malformed and absent profile IDs pay dispatch without touching heavy children") {
