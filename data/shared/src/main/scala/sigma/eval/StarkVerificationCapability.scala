@@ -26,6 +26,15 @@ object StarkVerificationCapability {
   final val MaxApplicationPayloadBytes: Int =
     Risc0ClaimBuilder.MaxApplicationPayloadBytes
 
+  /** Validation-only census hooks for authenticated profile dispatch. The
+    * callbacks carry no profile data and callers must not retain observers in
+    * production capability state.
+    */
+  private[sigma] trait DispatchLookupObserver {
+    def onEntryComparison(): Unit
+    def onByteComparison(): Unit
+  }
+
   /** No applicable transition snapshot exists for this invocation. */
   case object Unavailable extends StarkVerificationCapability
 
@@ -122,14 +131,22 @@ object StarkVerificationCapability {
     /** Exact unsigned-lexicographic profile lookup. The input is already
       * length-checked by the opcode adapter.
       */
-    private[sigma] def lookup(profileId: Array[Byte]): Option[ProfileEntry] = {
+    private[sigma] def lookup(profileId: Array[Byte]): Option[ProfileEntry] =
+      lookupObserved(profileId, null)
+
+    /** Validation-only route through the production lookup loop. */
+    private[sigma] def lookupObserved(
+        profileId: Array[Byte],
+        observer: DispatchLookupObserver): Option[ProfileEntry] = {
       var low = 0
       var high = entriesSnapshot.length - 1
       while (low <= high) {
         val mid = low + ((high - low) >>> 1)
-        val comparison = compareUnsigned(
+        val comparison = compareUnsignedObserved(
           profileId,
-          entriesSnapshot(mid).profileIdForComparison)
+          entriesSnapshot(mid).profileIdForComparison,
+          observer)
+        if (observer ne null) observer.onEntryComparison()
         if (comparison == 0) return Some(entriesSnapshot(mid))
         if (comparison < 0) high = mid - 1 else low = mid + 1
       }
@@ -270,11 +287,18 @@ object StarkVerificationCapability {
       Some(WrongDigestLength(name, ProfileIdBytes, value.length))
     else None
 
-  private def compareUnsigned(left: Array[Byte], right: Array[Byte]): Int = {
+  private def compareUnsigned(left: Array[Byte], right: Array[Byte]): Int =
+    compareUnsignedObserved(left, right, null)
+
+  private def compareUnsignedObserved(
+      left: Array[Byte],
+      right: Array[Byte],
+      observer: DispatchLookupObserver): Int = {
     var i = 0
     while (i < left.length && i < right.length) {
       val a = left(i) & 0xff
       val b = right(i) & 0xff
+      if (observer ne null) observer.onByteComparison()
       if (a != b) return if (a < b) -1 else 1
       i += 1
     }

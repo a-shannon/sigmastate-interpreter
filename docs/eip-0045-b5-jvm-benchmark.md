@@ -268,6 +268,26 @@ mutant that always returns false would survive these result assertions, so that
 mutant remains open. The test does not close B4 or B5, select consensus charges,
 show node execution or establish activation readiness.
 
+## Dispatch lookup census
+
+`Eip0045DispatchLookupCensusSpec` exercises the authenticated `Snapshot` table
+at its 65,535-entry limit. The absent-high case records 16 entry comparisons.
+Each entry comparison compares no more than 32 byte positions, reading one byte
+from each ID per position, using unsigned lexicographic order. Empty, singleton,
+middle, edge and internal-absence cases also run through the same binary-search
+loop.
+
+The existing `lookup(profileId)` signature is unchanged. A package-private
+observer reaches that loop for validation, receives no IDs or byte values and
+is not stored in capability state. The observer and null-observer results are
+checked against the production call. No benchmark, evidence, manifest or index
+schema changes.
+
+This is a source-level control-flow census. It does not measure time, JIT work,
+allocation, node admission or the full transaction path. The 16-by-32 bound is
+a bound on compared positions, so the path can read up to 1,024 array bytes
+across both IDs. It is not a consensus charge and does not close B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process
