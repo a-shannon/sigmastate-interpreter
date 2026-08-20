@@ -244,6 +244,30 @@ agrees with the existing static model for these paths. It does not count field
 arithmetic, JVM instructions, allocation sites, native work, node admission or
 the full Sigma transaction path, and it cannot select `fixedJit` or close B5.
 
+## Stock runtime negative path
+
+`Eip0045StockRuntimeNegativePathSpec` joins the frozen B1, B2 and B3 package to
+the po2-15 seal, host claim builder, stock runtime and `VerifyStark` evaluator.
+The retained claim first verifies as `Verified(1, 15)`. A deterministic
+`ErgoStatementV1` built from test chain, program, `SELF` contract and payload
+values produces a different claim; the unchanged seal then returns the exact
+`ClaimMismatch` result, and the real `Risc0StockProfileRuntime` returns Boolean
+false through an Active snapshot.
+
+The test changes chain domain, program ID, contract ID and payload one field at
+a time. Each derived claim remains a typed claim mismatch with the proof
+transport unchanged. A separate one-byte-short first chunk returns
+`WrongChunkLength(0, 65535, 65534)`. The Active-path placeholder control fails
+at the first heavy child after an exact test-only charge delta of 4,617: 5 for
+the static profile-ID child, then dispatch sentinel 1,709 and fixed sentinel
+2,903. Those sentinels are ordering controls, not proposed schedule values.
+
+This is negative-path evidence only. The repository still has no stock receipt
+whose retained claim matches this host-built statement. An implementation
+mutant that always returns false would survive these result assertions, so that
+mutant remains open. The test does not close B4 or B5, select consensus charges,
+show node execution or establish activation readiness.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process
