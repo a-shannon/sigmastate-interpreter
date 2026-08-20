@@ -5,6 +5,23 @@
  */
 package sigma.stark.profile
 
+/** Package-bounded, payload-free census hook for work completed after the
+  * opcode's program, payload and complete proof-shape guards. Production
+  * evaluation passes `null`; observer exceptions intentionally propagate.
+  */
+private[sigma] trait StarkPreVerifierObserver {
+  def onProofChunkMaterialized(): Unit
+  def onProgramIdMaterialized(): Unit
+  def onApplicationPayloadMaterialized(): Unit
+  def onSelfPropositionBytesMaterialized(): Unit
+  def onContractIdBuilt(): Unit
+  def onStatementBuilt(): Unit
+  def onJournalDigestBuilt(): Unit
+  def onTaggedStructDigestBuilt(): Unit
+  def onOkClaimBuilt(): Unit
+  def onRawVerifierEntered(): Unit
+}
+
 /** Host-only construction of the statement and RISC0 OK ReceiptClaim bound by
   * the first EIP-0045 profile.
   *
@@ -102,15 +119,32 @@ object Risc0ClaimBuilder {
       chainDomainId: Array[Byte],
       programId: Array[Byte],
       contractId: Array[Byte],
-      applicationPayload: Array[Byte]): Either[Failure, Binding] = {
+      applicationPayload: Array[Byte]): Either[Failure, Binding] =
+    buildObserved(
+      loadedProfile,
+      chainDomainId,
+      programId,
+      contractId,
+      applicationPayload,
+      null)
+
+  /** Validation-only route through the authenticated-profile overload. */
+  private[sigma] def buildObserved(
+      loadedProfile: Risc0ProfilePackageLoader.LoadedProfile,
+      chainDomainId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      observer: StarkPreVerifierObserver): Either[Failure, Binding] = {
     if (loadedProfile == null) return Left(NullInput("loaded-profile"))
-    build(
+    buildObserved(
       chainDomainId,
       loadedProfile.profileId,
       programId,
       contractId,
       applicationPayload,
-      loadedProfile.maxApplicationPayloadBytes)
+      loadedProfile.maxApplicationPayloadBytes,
+      observer)
   }
 
   /** Package-local primitive used by the authenticated-profile overload and
@@ -124,7 +158,41 @@ object Risc0ClaimBuilder {
       programId: Array[Byte],
       contractId: Array[Byte],
       applicationPayload: Array[Byte],
-      maxApplicationPayloadBytes: Int): Either[Failure, Binding] = {
+      maxApplicationPayloadBytes: Int): Either[Failure, Binding] =
+    buildImpl(
+      chainDomainId,
+      authenticatedProfileId,
+      programId,
+      contractId,
+      applicationPayload,
+      maxApplicationPayloadBytes,
+      null)
+
+  private[sigma] def buildObserved(
+      chainDomainId: Array[Byte],
+      authenticatedProfileId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      maxApplicationPayloadBytes: Int,
+      observer: StarkPreVerifierObserver): Either[Failure, Binding] =
+    buildImpl(
+      chainDomainId,
+      authenticatedProfileId,
+      programId,
+      contractId,
+      applicationPayload,
+      maxApplicationPayloadBytes,
+      observer)
+
+  private def buildImpl(
+      chainDomainId: Array[Byte],
+      authenticatedProfileId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      maxApplicationPayloadBytes: Int,
+      observer: StarkPreVerifierObserver): Either[Failure, Binding] = {
     validateDigest("chain-domain-id", chainDomainId) match {
       case Some(failure) => return Left(failure)
       case None          => ()
@@ -163,7 +231,9 @@ object Risc0ClaimBuilder {
       programSnapshot,
       contractSnapshot,
       payloadSnapshot)
-    val claim = deriveOkClaim(programSnapshot, statement)
+    if (observer ne null) observer.onStatementBuilt()
+    val claim = deriveOkClaim(programSnapshot, statement, observer)
+    if (observer ne null) observer.onOkClaimBuilt()
 
     Right(new Binding(
       statement,
@@ -182,17 +252,26 @@ object Risc0ClaimBuilder {
       case None          => ()
     }
     if (journal == null) return Left(NullInput("journal"))
-    Right(deriveOkClaim(programId.clone(), journal.clone()))
+    Right(deriveOkClaim(programId.clone(), journal.clone(), null))
   }
 
-  private def deriveOkClaim(programId: Array[Byte], journal: Array[Byte]): ClaimDigests = {
+  private def deriveOkClaim(
+      programId: Array[Byte],
+      journal: Array[Byte],
+      observer: StarkPreVerifierObserver): ClaimDigests = {
     val journalDigest = ProfileSha256.hash(journal)
-    val post = taggedStructDigest(SystemStateTag, Array(ZeroDigest), Array(0))
-    val output = taggedStructDigest(OutputTag, Array(journalDigest, ZeroDigest), Array.empty[Int])
+    if (observer ne null) observer.onJournalDigestBuilt()
+    val post = taggedStructDigest(SystemStateTag, Array(ZeroDigest), Array(0), observer)
+    val output = taggedStructDigest(
+      OutputTag,
+      Array(journalDigest, ZeroDigest),
+      Array.empty[Int],
+      observer)
     val expectedClaim = taggedStructDigest(
       ReceiptClaimTag,
       Array(ZeroDigest, programId, post, output),
-      Array(0, 0))
+      Array(0, 0),
+      observer)
     new ClaimDigests(journalDigest, post, output, expectedClaim)
   }
 
@@ -226,7 +305,8 @@ object Risc0ClaimBuilder {
   private def taggedStructDigest(
       tag: Array[Byte],
       down: Array[Array[Byte]],
-      data: Array[Int]): Array[Byte] = {
+      data: Array[Int],
+      observer: StarkPreVerifierObserver): Array[Byte] = {
     val preimage = new Array[Byte](
       DigestBytes + down.length * DigestBytes + data.length * 4 + 2)
     var offset = copy(ProfileSha256.hash(tag), preimage, 0)
@@ -245,7 +325,9 @@ object Risc0ClaimBuilder {
     offset += 2
     if (offset != preimage.length)
       throw new IllegalStateException("internal tagged-struct length mismatch")
-    ProfileSha256.hash(preimage)
+    val digest = ProfileSha256.hash(preimage)
+    if (observer ne null) observer.onTaggedStructDigestBuilt()
+    digest
   }
 
   private def validateDigest(name: String, value: Array[Byte]): Option[Failure] =

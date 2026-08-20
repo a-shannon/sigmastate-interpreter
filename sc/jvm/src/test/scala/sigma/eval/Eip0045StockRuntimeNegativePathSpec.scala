@@ -16,13 +16,81 @@ import sigma.ast._
 import sigma.ast.syntax.TrueSigmaProp
 import sigma.stark.profile.RawSealV1Decoder.WrongChunkLength
 import sigma.stark.profile.Risc0RawSealVerifier.{ClaimMismatch, TransportRejected, Verified}
-import sigma.stark.profile.{ProfileBlake2b256, Risc0ClaimBuilder, Risc0ProfilePackageLoader}
+import sigma.stark.profile.{ProfileBlake2b256, RawSealV1Decoder, Risc0ClaimBuilder, Risc0ProfilePackageLoader, StarkPreVerifierObserver}
 import sigmastate.helpers.ErgoLikeContextTesting
 import sigmastate.helpers.TestingHelpers.createBox
 import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator}
 
 class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
   import StarkVerificationCapability._
+
+  private val ProofChunkMaterialized = "proof-chunk-materialized"
+  private val ProgramIdMaterialized = "program-id-materialized"
+  private val ApplicationPayloadMaterialized = "application-payload-materialized"
+  private val SelfPropositionBytesMaterialized = "self-proposition-bytes-materialized"
+  private val ContractIdBuilt = "contract-id-built"
+  private val StatementBuilt = "statement-built"
+  private val JournalDigestBuilt = "journal-digest-built"
+  private val TaggedStructDigestBuilt = "tagged-struct-digest-built"
+  private val OkClaimBuilt = "ok-claim-built"
+  private val RawVerifierEntered = "raw-verifier-entered"
+
+  private val CanonicalPreVerifierEvents = Vector(
+    ProofChunkMaterialized,
+    ProofChunkMaterialized,
+    ProofChunkMaterialized,
+    ProofChunkMaterialized,
+    ProgramIdMaterialized,
+    ApplicationPayloadMaterialized,
+    SelfPropositionBytesMaterialized,
+    ContractIdBuilt,
+    StatementBuilt,
+    JournalDigestBuilt,
+    TaggedStructDigestBuilt,
+    TaggedStructDigestBuilt,
+    TaggedStructDigestBuilt,
+    OkClaimBuilt,
+    RawVerifierEntered)
+
+  private final class RecordingObserver extends StarkPreVerifierObserver {
+    private val recorded = scala.collection.mutable.ArrayBuffer.empty[String]
+    def events: Vector[String] = recorded.toVector
+
+    override def onProofChunkMaterialized(): Unit = recorded += ProofChunkMaterialized
+    override def onProgramIdMaterialized(): Unit = recorded += ProgramIdMaterialized
+    override def onApplicationPayloadMaterialized(): Unit =
+      recorded += ApplicationPayloadMaterialized
+    override def onSelfPropositionBytesMaterialized(): Unit =
+      recorded += SelfPropositionBytesMaterialized
+    override def onContractIdBuilt(): Unit = recorded += ContractIdBuilt
+    override def onStatementBuilt(): Unit = recorded += StatementBuilt
+    override def onJournalDigestBuilt(): Unit = recorded += JournalDigestBuilt
+    override def onTaggedStructDigestBuilt(): Unit = recorded += TaggedStructDigestBuilt
+    override def onOkClaimBuilt(): Unit = recorded += OkClaimBuilt
+    override def onRawVerifierEntered(): Unit = recorded += RawVerifierEntered
+  }
+
+  private final class ObserverSentinel extends RuntimeException
+
+  private final class ThrowingObserver(
+      target: String,
+      sentinel: ObserverSentinel) extends StarkPreVerifierObserver {
+    private def observe(event: String): Unit =
+      if (event == target) throw sentinel
+
+    override def onProofChunkMaterialized(): Unit = observe(ProofChunkMaterialized)
+    override def onProgramIdMaterialized(): Unit = observe(ProgramIdMaterialized)
+    override def onApplicationPayloadMaterialized(): Unit =
+      observe(ApplicationPayloadMaterialized)
+    override def onSelfPropositionBytesMaterialized(): Unit =
+      observe(SelfPropositionBytesMaterialized)
+    override def onContractIdBuilt(): Unit = observe(ContractIdBuilt)
+    override def onStatementBuilt(): Unit = observe(StatementBuilt)
+    override def onJournalDigestBuilt(): Unit = observe(JournalDigestBuilt)
+    override def onTaggedStructDigestBuilt(): Unit = observe(TaggedStructDigestBuilt)
+    override def onOkClaimBuilt(): Unit = observe(OkClaimBuilt)
+    override def onRawVerifierEntered(): Unit = observe(RawVerifierEntered)
+  }
 
   private val PackageRoot = "/stark-kats/eip0045-profile-package/"
   private val DirectRoot = "/stark-kats/eip0045-direct/"
@@ -81,8 +149,30 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     case Left(failure) => fail("stock runtime rejected frozen profile: " + failure)
   }
 
-  private def capability = {
-    val entry = active(runtime, FixedSentinel) match {
+  private final class LegacyRuntime extends StarkProfileRuntime {
+    var verifyCalls = 0
+    var lastContractId: Array[Byte] = null
+
+    override private[sigma] def profileId: Array[Byte] = loadedProfile.profileId
+    override private[sigma] def exactProofBytes: Int = loadedProfile.exactProofBytes
+    override private[sigma] def maxApplicationPayloadBytes: Int =
+      loadedProfile.maxApplicationPayloadBytes
+    override private[sigma] def canonicalProofChunkLengths: Array[Int] =
+      RawSealV1Decoder.canonicalChunkLengths
+    override private[sigma] def verify(
+        chainDomainId: Array[Byte],
+        programId: Array[Byte],
+        contractId: Array[Byte],
+        applicationPayload: Array[Byte],
+        proofChunks: Array[Array[Byte]]): Boolean = {
+      verifyCalls += 1
+      lastContractId = contractId.clone()
+      false
+    }
+  }
+
+  private def capabilityFor(selectedRuntime: StarkProfileRuntime) = {
+    val entry = active(selectedRuntime, FixedSentinel) match {
       case Right(value) => value
       case Left(failure) => fail("active entry rejected: " + failure)
     }
@@ -97,7 +187,7 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     }
   }
 
-  private def evaluator(): CErgoTreeEvaluator = {
+  private def evaluatorFor(selectedCapability: StarkVerificationCapability): CErgoTreeEvaluator = {
     val settings = CErgoTreeEvaluator.DefaultEvalSettings
     val accumulator = new CostAccumulator(JitCost(0), Some(JitCost.fromBlockCost(1000000)))
     val tree = ErgoTree.fromProposition(TrueSigmaProp)
@@ -113,8 +203,10 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
       accumulator,
       CErgoTreeEvaluator.DefaultProfiler,
       settings,
-      capability)
+      selectedCapability)
   }
+
+  private def evaluator(): CErgoTreeEvaluator = evaluatorFor(capabilityFor(runtime))
 
   private def evalDirect(evaluator: CErgoTreeEvaluator, value: Value[_ <: SType]): Any =
     VersionContext.withVersions(
@@ -122,6 +214,27 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
       VersionContext.StarkVerificationVersion) {
       evaluator.eval(Map.empty, value)
     }
+
+  private def evalObserved(
+      evaluator: CErgoTreeEvaluator,
+      value: VerifyStark,
+      observer: StarkPreVerifierObserver): Any =
+    VersionContext.withVersions(
+      VersionContext.StarkVerificationVersion,
+      VersionContext.StarkVerificationVersion) {
+      value.evalObserved(Map.empty, observer)(evaluator)
+    }
+
+  private def evaluateWithCost(
+      value: VerifyStark,
+      observer: StarkPreVerifierObserver): (Any, Int) = {
+    val e = evaluator()
+    val before = e.getAccumulatedCost.value
+    val result =
+      if (observer eq null) evalDirect(e, value)
+      else evalObserved(e, value, observer)
+    (result, e.getAccumulatedCost.value - before)
+  }
 
   private def proofValue(
       values: Array[Array[Byte]]): Value[SCollection[SCollection[SByte.type]]] =
@@ -247,5 +360,153 @@ class Eip0045StockRuntimeNegativePathSpec extends AnyFunSuite with Matchers {
     evalDirect(e, node(shortened)) shouldBe false
     e.getAccumulatedCost.value - before should be >=
       (DispatchSentinel + FixedSentinel)
+  }
+
+  test("canonical active path freezes the complete pre-verifier operation sequence") {
+    val proof = canonicalChunks(rawSeal)
+    val directEvaluator = evaluator()
+    val contractId = ProfileBlake2b256.hash(
+      directEvaluator.context.SELF.propositionBytes.toArray)
+    val binding = buildBinding(ChainDomainId, ProgramId, contractId, Payload)
+    loadedProfile.verifier.verify(proof, binding.expectedClaim) shouldBe Left(ClaimMismatch)
+
+    val observer = new RecordingObserver
+    val observed = evaluateWithCost(node(proof), observer)
+    val unobserved = evaluateWithCost(node(proof), null)
+
+    observed._1 shouldBe false
+    observed shouldBe unobserved
+    observer.events shouldBe CanonicalPreVerifierEvents
+  }
+
+  test("every program payload and proof shape guard precedes all pre-verifier events") {
+    val proof = canonicalChunks(rawSeal)
+    val shortFirstChunk = proof.map(_.clone())
+    shortFirstChunk(0) = java.util.Arrays.copyOf(
+      shortFirstChunk(0),
+      shortFirstChunk(0).length - 1)
+    val missingLastChunk = proof.take(proof.length - 1)
+    val oversizedPayload = new Array[Byte](loadedProfile.maxApplicationPayloadBytes + 1)
+    val shortProgramId = java.util.Arrays.copyOf(ProgramId, ProgramId.length - 1)
+    val cases = Vector(
+      "short-program-id" -> node(proof, programId = shortProgramId),
+      "oversized-payload" -> node(proof, payload = oversizedPayload),
+      "missing-last-chunk" -> node(missingLastChunk),
+      "short-first-chunk" -> node(shortFirstChunk))
+
+    cases.foreach { case (label, value) =>
+      withClue(label + ": ") {
+        val observer = new RecordingObserver
+        val observed = evaluateWithCost(value, observer)
+        val unobserved = evaluateWithCost(value, null)
+        observed._1 shouldBe false
+        observed shouldBe unobserved
+        observer.events shouldBe empty
+      }
+    }
+  }
+
+  test("pre-verifier observer exceptions propagate with object identity") {
+    val proof = canonicalChunks(rawSeal)
+    CanonicalPreVerifierEvents.distinct.foreach { event =>
+      withClue(event + ": ") {
+        val sentinel = new ObserverSentinel
+        val observed = intercept[ObserverSentinel] {
+          evalObserved(evaluator(), node(proof), new ThrowingObserver(event, sentinel))
+        }
+        observed should be theSameInstanceAs sentinel
+      }
+    }
+  }
+
+  test("observer seam preserves legacy descriptors and retains no observer state") {
+    val observerClass = classOf[StarkPreVerifierObserver]
+    val threadLocalClass = Class.forName("java.lang.ThreadLocal")
+    observerClass.getDeclaredFields.toSeq shouldBe empty
+    observerClass.getDeclaredMethods.map(_.getName).toSet shouldBe Set(
+      "onProofChunkMaterialized",
+      "onProgramIdMaterialized",
+      "onApplicationPayloadMaterialized",
+      "onSelfPropositionBytesMaterialized",
+      "onContractIdBuilt",
+      "onStatementBuilt",
+      "onJournalDigestBuilt",
+      "onTaggedStructDigestBuilt",
+      "onOkClaimBuilt",
+      "onRawVerifierEntered")
+    observerClass.getDeclaredMethods.foreach { method =>
+      method.getParameterTypes.toSeq shouldBe empty
+      method.getReturnType shouldBe java.lang.Void.TYPE
+    }
+
+    Seq(
+      classOf[VerifyStark],
+      classOf[Risc0StockProfileRuntime],
+      Risc0ClaimBuilder.getClass,
+      classOf[Risc0ClaimBuilder.Binding]).foreach { clazz =>
+      val retained = clazz.getDeclaredFields.filter { field =>
+        val lowerName = field.getName.toLowerCase(java.util.Locale.ROOT)
+        observerClass.isAssignableFrom(field.getType) ||
+          threadLocalClass.isAssignableFrom(field.getType) ||
+          lowerName.contains("observer") || lowerName.contains("probe")
+      }
+      withClue(clazz.getName + ": ") {
+        retained.toSeq shouldBe empty
+      }
+    }
+
+    val legacyEval = classOf[VerifyStark].getDeclaredMethods.filter(_.getName == "eval")
+    legacyEval should have length 1
+    legacyEval.head.getParameterTypes should have length 2
+
+    val runtimeVerify = classOf[StarkProfileRuntime].getDeclaredMethods
+      .filter(_.getName == "verify")
+    runtimeVerify should have length 1
+    runtimeVerify.head.getParameterTypes should have length 5
+    runtimeVerify.head.getReturnType shouldBe java.lang.Boolean.TYPE
+    classOf[StarkProfileRuntime].getDeclaredMethods
+      .filter(_.getName == "verifyObserved") shouldBe empty
+
+    val claimBuildArities = Risc0ClaimBuilder.getClass.getDeclaredMethods
+      .filter(_.getName == "build")
+      .map(_.getParameterTypes.length)
+      .sorted
+      .toSeq
+    claimBuildArities shouldBe Seq(5, 6)
+
+    val observedSeams = Seq(
+      classOf[VerifyStark] -> "evalObserved",
+      classOf[Risc0StockProfileRuntime] -> "verifyObserved",
+      Risc0ClaimBuilder.getClass -> "buildObserved")
+    observedSeams.foreach { case (clazz, methodName) =>
+      clazz.getDeclaredMethods.exists { method =>
+        method.getName.startsWith(methodName + "$default$")
+      } shouldBe false
+    }
+    an[ClassNotFoundException] shouldBe thrownBy(
+      Class.forName("sigma.stark.profile.StarkPreVerifierObserver$"))
+  }
+
+  test("legacy runtime shape needs only the historical verify method") {
+    val legacyRuntime = new LegacyRuntime
+    val proof = canonicalChunks(rawSeal)
+    val directEvaluator = evaluatorFor(capabilityFor(legacyRuntime))
+    val expectedContractId = ProfileBlake2b256.hash(
+      directEvaluator.context.SELF.propositionBytes.toArray)
+
+    evalDirect(
+      directEvaluator,
+      node(proof)) shouldBe false
+    legacyRuntime.verifyCalls shouldBe 1
+    legacyRuntime.lastContractId should contain theSameElementsInOrderAs expectedContractId
+
+    val observer = new RecordingObserver
+    evalObserved(
+      evaluatorFor(capabilityFor(legacyRuntime)),
+      node(proof),
+      observer) shouldBe false
+    legacyRuntime.verifyCalls shouldBe 2
+    legacyRuntime.lastContractId should contain theSameElementsInOrderAs expectedContractId
+    observer.events shouldBe CanonicalPreVerifierEvents.take(8)
   }
 }

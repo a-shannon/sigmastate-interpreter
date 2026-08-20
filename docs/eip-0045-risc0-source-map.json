@@ -399,14 +399,15 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/ErgoStarkStatement.scala",
-      "sha256": "9f2218e4434bf6f70cb9ee0de2983660f2673dd8770519327bb85a63fc32b107",
+      "sha256": "9127fd34e36ca2af5533c51ae862861a3902a4d08e3a432e5d2f134a5f6d9488",
       "provenance": "original",
       "sources": [],
       "transformations": [
         "Original EIP-0045 ErgoStatementV1 and RISC0 OK ReceiptClaim binding by A. Shannon.",
         "Derives the expected claim only from authenticated profile data, chain domain, program ID, contract ID, and bounded application payload.",
         "Uses defensive input snapshots, exact little-endian statement framing, tagged-struct SHA-256, and typed host-input rejection.",
-        "Rejects any configured payload maximum above the largest V1 statement length representable by the verifier's signed-Int framing."
+        "Rejects any configured payload maximum above the largest V1 statement length representable by the verifier's signed-Int framing.",
+        "Offers package-bounded, payload-free observation of contract-ID, statement, journal-digest, tagged-digest, and OK-claim construction while the production path passes null and retains no observer state."
       ]
     },
     {

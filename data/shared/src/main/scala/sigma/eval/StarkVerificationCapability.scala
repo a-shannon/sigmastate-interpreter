@@ -7,7 +7,7 @@ package sigma.eval
 
 import sigma.ast.JitCost
 import sigma.exceptions.StarkProfileRuntimeException
-import sigma.stark.profile.{RawSealV1Decoder, Risc0ClaimBuilder, Risc0ProfilePackageLoader}
+import sigma.stark.profile.{RawSealV1Decoder, Risc0ClaimBuilder, Risc0ProfilePackageLoader, StarkPreVerifierObserver}
 
 /** Trusted, invocation-specific host capability for EIP-0045 verification.
   *
@@ -329,13 +329,24 @@ trait StarkProfileRuntime {
       proofChunks: Array[Array[Byte]]): Boolean
 }
 
+/** Package-bounded opt-in for runtimes that expose the validation census. */
+private[sigma] trait ObservedStarkProfileRuntime extends StarkProfileRuntime {
+  private[sigma] def verifyObserved(
+      chainDomainId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      proofChunks: Array[Array[Byte]],
+      observer: StarkPreVerifierObserver): Boolean
+}
+
 /** Initial stock RISC0 v3 runtime backed only by an authenticated B1/B2/B3
   * package. It derives ErgoStatementV1 and the expected OK ReceiptClaim
   * internally before invoking the raw-seal verifier.
   */
 final class Risc0StockProfileRuntime private (
     loadedProfile: Risc0ProfilePackageLoader.LoadedProfile)
-    extends StarkProfileRuntime {
+    extends ObservedStarkProfileRuntime {
   override private[sigma] def profileId: Array[Byte] = loadedProfile.profileId
   override private[sigma] def exactProofBytes: Int = loadedProfile.exactProofBytes
   override private[sigma] def maxApplicationPayloadBytes: Int =
@@ -349,16 +360,48 @@ final class Risc0StockProfileRuntime private (
       contractId: Array[Byte],
       applicationPayload: Array[Byte],
       proofChunks: Array[Array[Byte]]): Boolean =
-    Risc0ClaimBuilder.build(
+    verifyImpl(
+      chainDomainId,
+      programId,
+      contractId,
+      applicationPayload,
+      proofChunks,
+      null)
+
+  override private[sigma] def verifyObserved(
+      chainDomainId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      proofChunks: Array[Array[Byte]],
+      observer: StarkPreVerifierObserver): Boolean =
+    verifyImpl(
+      chainDomainId,
+      programId,
+      contractId,
+      applicationPayload,
+      proofChunks,
+      observer)
+
+  private def verifyImpl(
+      chainDomainId: Array[Byte],
+      programId: Array[Byte],
+      contractId: Array[Byte],
+      applicationPayload: Array[Byte],
+      proofChunks: Array[Array[Byte]],
+      observer: StarkPreVerifierObserver): Boolean =
+    Risc0ClaimBuilder.buildObserved(
       loadedProfile,
       chainDomainId,
       programId,
       contractId,
-      applicationPayload) match {
+      applicationPayload,
+      observer) match {
       case Left(failure) =>
         throw new StarkProfileRuntimeException(
           "Authenticated RISC0 runtime rejected host-bound claim input: " + failure.code)
       case Right(binding) =>
+        if (observer ne null) observer.onRawVerifierEntered()
         loadedProfile.verifier.verify(proofChunks, binding.expectedClaim).isRight
     }
 }

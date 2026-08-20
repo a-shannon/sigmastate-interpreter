@@ -268,6 +268,34 @@ mutant that always returns false would survive these result assertions, so that
 mutant remains open. The test does not close B4 or B5, select consensus charges,
 show node execution or establish activation readiness.
 
+## Pre-verifier operation census
+
+The same stock-runtime test now records the deterministic work between the
+shape guards and the raw-verifier call. The canonical Active path records 15
+events in order: four proof-chunk copies, then the program ID, application
+payload and `SELF` proposition-byte copies, the completed contract-ID BLAKE2b,
+`ErgoStatementV1` construction, the journal SHA-256, three tagged-struct
+SHA-256 operations, the OK claim and one raw-verifier entry. The direct verifier
+still returns the exact typed `ClaimMismatch`, and the evaluator still returns
+false.
+
+A one-byte-short first chunk returns false before any of those events. The same
+zero-event rule is checked for a short program ID, an oversized payload and a
+missing final chunk. Observed and ordinary calls have identical verdicts and
+JIT charge deltas. Observer exceptions leave the production call with object
+identity intact.
+
+The observer is package-bounded, receives no proof or statement values and is
+passed only as a method parameter. The base `StarkProfileRuntime` shape still
+has only its historical `verify` method. The ordinary path calls that method
+directly, while the stock runtime alone opts into a package-bounded observed
+route; an observed legacy runtime falls back to `verify`. No observer, wrapper
+or default argument is retained. Existing `VerifyStark.eval`,
+`StarkProfileRuntime.verify` and `Risc0ClaimBuilder.build` JVM descriptors stay
+unchanged. This census records source-level control flow. It does not measure
+allocations, time, native work, node admission or the full transaction path,
+and it neither selects consensus charges nor closes B5.
+
 ## Dispatch lookup census
 
 `Eip0045DispatchLookupCensusSpec` exercises the authenticated `Snapshot` table

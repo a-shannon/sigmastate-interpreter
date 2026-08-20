@@ -5,10 +5,11 @@ import sigma.ast.SCollection.SByteArray
 import sigma.eval.ErgoTreeEvaluator
 import sigma.eval.ErgoTreeEvaluator.DataEnv
 import sigma.eval.StarkVerificationCapability.{ActiveLifecycle, QuarantinedLifecycle, Snapshot, Unavailable}
+import sigma.eval.ObservedStarkProfileRuntime
 import sigma.exceptions.{OpcodeUnavailableException, StarkProfileQuarantinedException}
 import sigma.serialization.OpCodes
 import sigma.serialization.ValueCodes.OpCode
-import sigma.stark.profile.ProfileBlake2b256
+import sigma.stark.profile.{ProfileBlake2b256, StarkPreVerifierObserver}
 
 /**
  * Native STARK proof verifier node (EIP-0045).
@@ -34,7 +35,18 @@ case class VerifyStark(
 
   override def opType: SFunc = VerifyStark.OpType
 
-  protected final override def eval(env: DataEnv)(implicit E: ErgoTreeEvaluator): Any = {
+  protected final override def eval(env: DataEnv)(implicit E: ErgoTreeEvaluator): Any =
+    evalImpl(env, null)
+
+  /** Validation-only route through the exact production evaluator body. */
+  private[sigma] final def evalObserved(
+      env: DataEnv,
+      observer: StarkPreVerifierObserver)(implicit E: ErgoTreeEvaluator): Any =
+    evalImpl(env, observer)
+
+  private def evalImpl(
+      env: DataEnv,
+      observer: StarkPreVerifierObserver)(implicit E: ErgoTreeEvaluator): Any = {
     // Opcode availability is first enforced by the whole-input preflight.
     // This evaluator guard is defense in depth and deliberately precedes every
     // child so no direct evaluator entry can make unavailable code true under
@@ -88,19 +100,42 @@ case class VerifyStark(
               i = 0
               while (i < chunkArrays.length) {
                 chunkArrays(i) = evaluatedChunks(i).toArray
+                if (observer ne null) observer.onProofChunkMaterialized()
                 i += 1
               }
               val programIdBytes = evaluatedProgramId.toArray
+              if (observer ne null) observer.onProgramIdMaterialized()
               val payloadBytes = evaluatedPayload.toArray
-              val contractId = ProfileBlake2b256.hash(
-                E.context.SELF.propositionBytes.toArray)
+              if (observer ne null) observer.onApplicationPayloadMaterialized()
+              val propositionBytes = E.context.SELF.propositionBytes.toArray
+              if (observer ne null) observer.onSelfPropositionBytesMaterialized()
+              val contractId = ProfileBlake2b256.hash(propositionBytes)
+              if (observer ne null) observer.onContractIdBuilt()
 
-              active.runtime.verify(
-                snapshot.chainDomainId,
-                programIdBytes,
-                contractId,
-                payloadBytes,
-                chunkArrays)
+              if (observer eq null)
+                active.runtime.verify(
+                  snapshot.chainDomainId,
+                  programIdBytes,
+                  contractId,
+                  payloadBytes,
+                  chunkArrays)
+              else active.runtime match {
+                case observedRuntime: ObservedStarkProfileRuntime =>
+                  observedRuntime.verifyObserved(
+                    snapshot.chainDomainId,
+                    programIdBytes,
+                    contractId,
+                    payloadBytes,
+                    chunkArrays,
+                    observer)
+                case _ =>
+                  active.runtime.verify(
+                    snapshot.chainDomainId,
+                    programIdBytes,
+                    contractId,
+                    payloadBytes,
+                    chunkArrays)
+              }
           }
         }
     }
