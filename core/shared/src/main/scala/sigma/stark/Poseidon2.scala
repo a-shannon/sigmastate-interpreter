@@ -140,6 +140,40 @@ object Poseidon2 {
     java.util.Arrays.copyOfRange(state, 0, CellsOut)
   }
 
+  /** Diagnostic variant of [[unpaddedHash]]. The production `null` path
+    * delegates to the allocation-stable implementation above. Events are
+    * emitted only after the corresponding permutation or complete hash call
+    * succeeds; observer exceptions intentionally propagate.
+    */
+  private[stark] def unpaddedHash(
+      input: Array[Int],
+      observer: VerifierOperationObserver): Array[Int] = {
+    if (observer eq null) return unpaddedHash(input)
+
+    val state = new Array[Int](Cells)
+    var unmixed = 0
+    var i = 0
+    while (i < input.length) {
+      state(unmixed) = input(i)
+      unmixed += 1
+      if (unmixed == CellsRate) {
+        mix(state)
+        observer.onOperation(VerifierOperationObserver.ContentHashPermutation)
+        unmixed = 0
+      }
+      i += 1
+    }
+    if (unmixed != 0 || input.length == 0) {
+      var j = unmixed
+      while (j < CellsRate) { state(j) = 0; j += 1 }
+      mix(state)
+      observer.onOperation(VerifierOperationObserver.ContentHashPermutation)
+    }
+    val out = java.util.Arrays.copyOfRange(state, 0, CellsOut)
+    observer.onOperation(VerifierOperationObserver.ContentHashCall)
+    out
+  }
+
   /** Merkle node compression — `unpadded_hash` of two 8-element digests
     * (RISC0 `Poseidon2HashFn.hash_pair`).
     */

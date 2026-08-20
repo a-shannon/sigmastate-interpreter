@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{FileAlreadyExistsException, Files, Paths, StandardOpenOption}
 import java.time.Instant
 
-import sigma.stark.FriVerifier
+import sigma.stark.{FriVerifier, VerifierOperationObserver}
 import sigma.stark.profile.{
   RawSealV1Decoder,
   Risc0ClaimBuilder,
@@ -73,21 +73,70 @@ object Eip0045VerifierBenchmark {
     override def beforeOutput(): Unit = ()
   }
 
-  private final class ValidationProbe extends Probe {
+  private[benchmark] final case class OperationCounts(
+      topPairHashes: Int,
+      queryPairHashes: Int,
+      contentHashCalls: Int,
+      contentHashPermutations: Int,
+      rngCommits: Int,
+      rngElementDraws: Int,
+      rngPermutations: Int)
+
+  private val FullOperationCounts =
+    OperationCounts(217, 4050, 353, 1384, 12, 244, 32)
+  private val NoOperationCounts =
+    OperationCounts(0, 0, 0, 0, 0, 0, 0)
+  private val EarlyCanonicalOperationCounts =
+    OperationCounts(31, 0, 1, 3, 4, 0, 4)
+
+  private final class ValidationProbe extends Probe with VerifierOperationObserver {
+    import VerifierOperationObserver._
+
     var queries: Int = 0
     var lastCheckpoint: String = "none"
+    private var topPairHashes = 0
+    private var queryPairHashes = 0
+    private var contentHashCalls = 0
+    private var contentHashPermutations = 0
+    private var rngCommits = 0
+    private var rngElementDraws = 0
+    private var rngPermutations = 0
+
+    override private[stark] def operationSinkOrNull: VerifierOperationObserver = this
+
     override def onCheckpoint(label: String, _values: Array[Int]): Unit = {
       lastCheckpoint = label
       if (label == "query") queries += 1
     }
+
+    override def onOperation(operationId: Int): Unit = operationId match {
+      case MerkleTopPairHash      => topPairHashes += 1
+      case MerkleQueryPairHash    => queryPairHashes += 1
+      case ContentHashCall        => contentHashCalls += 1
+      case ContentHashPermutation => contentHashPermutations += 1
+      case RngCommit              => rngCommits += 1
+      case RngElementDraw         => rngElementDraws += 1
+      case RngPermutation         => rngPermutations += 1
+      case other => throw new IllegalStateException("unknown verifier operation id: " + other)
+    }
+
+    def operationCounts: OperationCounts = OperationCounts(
+      topPairHashes,
+      queryPairHashes,
+      contentHashCalls,
+      contentHashPermutations,
+      rngCommits,
+      rngElementDraws,
+      rngPermutations)
   }
 
-  private final case class Scenario(
+  private[benchmark] final case class Scenario(
       id: String,
       expectedOutcome: String,
       expectedQueries: Int,
       expectedValidationBoundary: String,
       expectedLastCheckpoint: String,
+      expectedOperationCounts: OperationCounts,
       run: () => Either[Failure, Verified],
       runWithProbe: Probe => Either[Failure, Verified])
 
@@ -514,6 +563,7 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "verification-complete",
         "query",
+        FullOperationCounts,
         () => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim, probe)),
       Scenario(
@@ -522,6 +572,7 @@ object Eip0045VerifierBenchmark {
         0,
         "transport-chunk-shape",
         "none",
+        NoOperationCounts,
         () => fixture.verifier.verify(earlyRejectedChunks, fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           earlyRejectedChunks,
@@ -533,6 +584,7 @@ object Eip0045VerifierBenchmark {
         0,
         "terminal-control-allowlist",
         "group_root_code",
+        EarlyCanonicalOperationCounts,
         () => fixture.verifier.verify(
           earlyCanonicalMutationChunks,
           fixture.primary.expectedClaim),
@@ -546,6 +598,7 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "fri",
         "query",
+        FullOperationCounts,
         () => fixture.verifier.verify(lateMutationChunks, fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           lateMutationChunks,
@@ -557,6 +610,7 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "expected-claim-comparison",
         "query",
+        FullOperationCounts,
         () => fixture.verifier.verify(validChunks, wrongClaim),
         probe => fixture.verifier.verify(validChunks, wrongClaim, probe)),
       Scenario(
@@ -565,6 +619,7 @@ object Eip0045VerifierBenchmark {
         FriVerifier.Queries,
         "verification-complete",
         "query",
+        FullOperationCounts,
         () => fixture.verifier.verify(
           independentValidChunks,
           fixture.independent.expectedClaim),
@@ -573,6 +628,9 @@ object Eip0045VerifierBenchmark {
           fixture.independent.expectedClaim,
           probe)))
   }
+
+  private[benchmark] def operationCensusScenariosForTest(): Vector[Scenario] =
+    buildScenarios(loadFixture(NoExecutionObserver))
 
   private def validateScenario(
       scenario: Scenario,
@@ -596,6 +654,11 @@ object Eip0045VerifierBenchmark {
       throw new IllegalStateException(
         scenario.id + " last verifier checkpoint was " + probe.lastCheckpoint +
           "; expected " + scenario.expectedLastCheckpoint)
+    }
+    if (probe.operationCounts != scenario.expectedOperationCounts) {
+      throw new IllegalStateException(
+        scenario.id + " observed operation counts " + probe.operationCounts +
+          "; expected " + scenario.expectedOperationCounts)
     }
     ValidationResult(probe.queries, boundary, probe.lastCheckpoint)
   }

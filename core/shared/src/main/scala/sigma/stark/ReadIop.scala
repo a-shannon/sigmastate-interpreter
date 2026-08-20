@@ -119,6 +119,10 @@ final class ReadIop(proof: Array[Int]) {
     */
   def commit(digestRaw: Array[Int]): Unit = rng.mix(digestRaw)
 
+  private[stark] def commit(
+      digestRaw: Array[Int],
+      observer: VerifierOperationObserver): Unit = rng.mix(digestRaw, observer)
+
   /** True iff the entire proof stream has been consumed (upstream
     * `verify_complete` — an assert in 1.2.6, `Err(ReceiptFormatError)` in
     * 3.0.4 when words remain).
@@ -130,9 +134,19 @@ final class ReadIop(proof: Array[Int]) {
     */
   def randomElem(): Int = rng.randomElem()
 
+  private[stark] def randomElem(observer: VerifierOperationObserver): Int =
+    rng.randomElem(observer)
+
   /** Cryptographically uniform `bits`-bit value (upstream `random_bits`). */
   def randomBits(bits: Int): Int = rng.randomBits(bits)
 
+  private[stark] def randomBits(
+      bits: Int,
+      observer: VerifierOperationObserver): Int = rng.randomBits(bits, observer)
+
   /** Uniform extension-field challenge (upstream `random_ext_elem`). */
   def randomExtElem(): Ext4 = rng.randomExtElem()
+
+  private[stark] def randomExtElem(observer: VerifierOperationObserver): Ext4 =
+    rng.randomExtElem(observer)
 }

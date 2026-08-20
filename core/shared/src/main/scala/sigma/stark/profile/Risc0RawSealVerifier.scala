@@ -9,7 +9,7 @@
  */
 package sigma.stark.profile
 
-import sigma.stark.{BabyBear, Ext4, FriVerifier, MerkleVerifier, Poseidon2, ReadIop}
+import sigma.stark.{BabyBear, Ext4, FriVerifier, MerkleVerifier, Poseidon2, ReadIop, VerifierOperationObserver}
 import sigma.stark.circuit.{CircuitTapSet, PolyExtInterpreter, PolyExtOp, PolyExtTable}
 
 /** Direct verifier for the EIP-0045 stock RISC0 raw-seal profile.
@@ -160,8 +160,8 @@ final class Risc0RawSealVerifier private[profile] (
     val taps = p.taps
     val iop = new ReadIop(seal)
 
-    iop.commit(proofSystemDigest)
-    iop.commit(circuitDigest)
+    iop.commit(proofSystemDigest, probe.operationSinkOrNull)
+    iop.commit(circuitDigest, probe.operationSinkOrNull)
 
     // read_slice_with_po2(OUTPUT_SIZE): the output elements are ordinary
     // field values; the final slot contains a literal raw u32 exponent.
@@ -169,7 +169,9 @@ final class Risc0RawSealVerifier private[profile] (
       case None    => return Left(MalformedProof("output", "truncated or unreduced output slice"))
       case Some(s) => s
     }
-    iop.commit(Poseidon2.unpaddedHash(slice).map(BabyBear.toRaw))
+    iop.commit(
+      Poseidon2.unpaddedHash(slice, probe.operationSinkOrNull).map(BabyBear.toRaw),
+      probe.operationSinkOrNull)
     val out = java.util.Arrays.copyOfRange(slice, 0, p.outputSize)
     val outerPo2 = BabyBear.toRaw(slice(p.outputSize))
     if (outerPo2 != profileSnapshot.outerPo2)
@@ -184,7 +186,12 @@ final class Risc0RawSealVerifier private[profile] (
 
     // Merkle group ids are 0=accum, 1=code, 2=data. Transcript creation
     // order is CODE, DATA, ACCUM; query-opening order is ACCUM, CODE, DATA.
-    val codeMerkle = MerkleVerifier.create(iop, domain, taps.groupSize(1), p.queries) match {
+    val codeMerkle = MerkleVerifier.create(
+      iop,
+      domain,
+      taps.groupSize(1),
+      p.queries,
+      probe.operationSinkOrNull) match {
       case Left(detail) => return Left(MalformedProof("code-group", detail))
       case Right(tree)  => tree
     }
@@ -199,7 +206,12 @@ final class Risc0RawSealVerifier private[profile] (
       "derived_terminal_control",
       Array(terminalControl.kind, terminalControl.parameter))
 
-    val dataMerkle = MerkleVerifier.create(iop, domain, taps.groupSize(2), p.queries) match {
+    val dataMerkle = MerkleVerifier.create(
+      iop,
+      domain,
+      taps.groupSize(2),
+      p.queries,
+      probe.operationSinkOrNull) match {
       case Left(detail) => return Left(MalformedProof("data-group", detail))
       case Right(tree)  => tree
     }
@@ -208,26 +220,36 @@ final class Risc0RawSealVerifier private[profile] (
     val mixGlobals = new Array[Int](p.mixSize)
     var i = 0
     while (i < mixGlobals.length) {
-      mixGlobals(i) = iop.randomElem()
+      mixGlobals(i) = iop.randomElem(probe.operationSinkOrNull)
       i += 1
     }
     checkpoint(probe, "mix", mixGlobals)
 
-    val accumMerkle = MerkleVerifier.create(iop, domain, taps.groupSize(0), p.queries) match {
+    val accumMerkle = MerkleVerifier.create(
+      iop,
+      domain,
+      taps.groupSize(0),
+      p.queries,
+      probe.operationSinkOrNull) match {
       case Left(detail) => return Left(MalformedProof("accum-group", detail))
       case Right(tree)  => tree
     }
     checkpoint(probe, "group_root_accum", accumMerkle.rootRawOwned)
 
-    val polyMix = iop.randomExtElem()
+    val polyMix = iop.randomExtElem(probe.operationSinkOrNull)
     checkpoint(probe, "poly_mix", extWords(polyMix))
 
-    val checkMerkle = MerkleVerifier.create(iop, domain, p.checkSize, p.queries) match {
+    val checkMerkle = MerkleVerifier.create(
+      iop,
+      domain,
+      p.checkSize,
+      p.queries,
+      probe.operationSinkOrNull) match {
       case Left(detail) => return Left(MalformedProof("check-group", detail))
       case Right(tree)  => tree
     }
 
-    val z = iop.randomExtElem()
+    val z = iop.randomExtElem(probe.operationSinkOrNull)
     checkpoint(probe, "z", extWords(z))
     val backOne = FriVerifier.RouRev(outerPo2)
 
@@ -236,7 +258,9 @@ final class Risc0RawSealVerifier private[profile] (
       case None    => return Left(MalformedProof("coeff-u", "truncated or unreduced coefficient slice"))
       case Some(s) => s
     }
-    iop.commit(Poseidon2.unpaddedHash(coeffWords).map(BabyBear.toRaw))
+    iop.commit(
+      Poseidon2.unpaddedHash(coeffWords, probe.operationSinkOrNull).map(BabyBear.toRaw),
+      probe.operationSinkOrNull)
     checkpoint(probe, "coeff_u", coeffWords)
 
     val coeffU = new Array[Ext4](numTaps + p.checkSize)
@@ -297,7 +321,7 @@ final class Risc0RawSealVerifier private[profile] (
     if (check != result) return Left(ConstraintCheckFailed)
 
     // DEEP-ALI batching.
-    val friMix = iop.randomExtElem()
+    val friMix = iop.randomExtElem(probe.operationSinkOrNull)
     checkpoint(probe, "fri_batch_mix", extWords(friMix))
     val comboU = Array.fill(taps.totComboBacks + 1)(Ext4.Zero)
     val tapMixPows = new Array[Ext4](taps.regs.length)
@@ -333,16 +357,16 @@ final class Risc0RawSealVerifier private[profile] (
     val inner: Int => Either[String, Ext4] = { index =>
       checkpoint(probe, "query", Array(queryNumber, index))
       queryNumber += 1
-      accumMerkle.verify(iop, index) match {
+      accumMerkle.verify(iop, index, probe.operationSinkOrNull) match {
         case Left(detail) => Left("accum row: " + detail)
         case Right(accumRow) =>
-          codeMerkle.verify(iop, index) match {
+          codeMerkle.verify(iop, index, probe.operationSinkOrNull) match {
             case Left(detail) => Left("code row: " + detail)
             case Right(codeRow) =>
-              dataMerkle.verify(iop, index) match {
+              dataMerkle.verify(iop, index, probe.operationSinkOrNull) match {
                 case Left(detail) => Left("data row: " + detail)
                 case Right(dataRow) =>
-                  checkMerkle.verify(iop, index) match {
+                  checkMerkle.verify(iop, index, probe.operationSinkOrNull) match {
                     case Left(detail) => Left("check row: " + detail)
                     case Right(checkRow) =>
                       Right(friEvalTaps(
@@ -360,7 +384,13 @@ final class Risc0RawSealVerifier private[profile] (
       }
     }
 
-    FriVerifier.friVerify(iop, totCycles, p.queries, inner) match {
+    FriVerifier.friVerify(
+      iop,
+      totCycles,
+      p.queries,
+      inner,
+      FriVerifier.NoProbe,
+      probe.operationSinkOrNull) match {
       case Left(detail) => return Left(MalformedProof("fri", detail))
       case Right(_)     => ()
     }
@@ -597,6 +627,7 @@ object Risc0RawSealVerifier {
 
   trait Probe {
     def onCheckpoint(label: String, values: Array[Int]): Unit = ()
+    private[stark] def operationSinkOrNull: VerifierOperationObserver = null
   }
   object NoProbe extends Probe
 

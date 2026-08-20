@@ -217,6 +217,33 @@ occurred, or decide whether a campaign is sufficient for B5. The public
 manifest should contain policy identities and public machine descriptions,
 never raw JVM arguments, credentials, local paths or private host metadata.
 
+## Dynamic primitive census
+
+Before warmup, the runner checks each scenario with an integer-ID operation
+observer. The observer receives no proof data. It counts seven direct-verifier
+primitives, and an observer exception leaves the verifier rather than becoming
+a proof rejection. No observer is stored in the verifier, transcript RNG,
+`ReadIop`, Merkle verifier or FRI round state.
+
+| Validation path | Top pair hashes | Query pair hashes | Content hash calls | Content permutations | RNG commits | RNG element draws | RNG permutations | Total Poseidon2 permutations |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Valid proof, both late paths, independent receipt | 217 | 4,050 | 353 | 1,384 | 12 | 244 | 32 | 5,683 |
+| Early transport rejection | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Canonical byte-132 mutation | 31 | 0 | 1 | 3 | 4 | 0 | 4 | 38 |
+
+The total is `top pair hashes + query pair hashes + content permutations + RNG
+permutations`. Hash-call, commit and draw counts describe control flow; adding
+them again would double-count work already represented by the permutation
+columns. The two valid receipts have different guests and terminal control
+parameters but the same verifier profile shape, so their vectors match.
+
+This check is validation-only. Warmup and sample collection call the production
+`NoProbe` path, and the seven counts are not written into V5 evidence. The
+evidence, campaign-manifest and archive-index schemas are unchanged. The census
+agrees with the existing static model for these paths. It does not count field
+arithmetic, JVM instructions, allocation sites, native work, node admission or
+the full Sigma transaction path, and it cannot select `fixedJit` or close B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process
@@ -246,9 +273,10 @@ multi-host/repeated-operator campaign required before activation.
 The benchmark measures two real direct-verifier positives, po2-15 and po2-16.
 The po2-16 KAT uses a different guest and journal, so it is not one of the 11
 positive profile cases required by the conformance corpus. These two cases do
-not run a complete operation/allocation census, exercise the full
-Sigma/transaction path, measure dispatch, or attest the source build that
-produced the verifier bytes.
+not provide a complete operation or allocation census. The validation-only
+counts cover seven named primitives in the direct verifier; they do not exercise
+the full Sigma/transaction path, measure dispatch or attest the source build
+that produced the verifier bytes.
 
 Run-policy resolution does not attest the operator, prove host isolation or
 show that a particular JVM invocation occurred. The archive validator checks
@@ -270,9 +298,10 @@ isolated fork with no concurrent peak resetter. A transient topology change or
 an external reset that leaves the final `usedBytes` inequalities intact can go
 undetected.
 
-The boundary and checkpoint fields come from the untimed validation call. They
-record where that call stopped under the typed verifier result and probe labels.
-They are not operation counts, cost bounds or measurements of the timed calls.
+The V5 boundary and checkpoint fields come from the untimed validation call.
+They record where that call stopped under the typed verifier result and probe
+labels. V5 does not serialize the operation counters, and none of those fields
+is a cost bound or measurement of a timed call.
 
 ## Retained local diagnostic
 

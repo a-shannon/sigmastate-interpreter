@@ -51,6 +51,30 @@ final class Poseidon2Rng {
     Poseidon2.mix(cells)
   }
 
+  private[stark] def mix(
+      digestWords: Array[Int],
+      observer: VerifierOperationObserver): Unit = {
+    if (observer eq null) {
+      mix(digestWords)
+      return
+    }
+
+    require(digestWords.length == Poseidon2.CellsOut, "digest is 8 words")
+    if (poolUsed != 0) {
+      Poseidon2.mix(cells)
+      observer.onOperation(VerifierOperationObserver.RngPermutation)
+      poolUsed = 0
+    }
+    var i = 0
+    while (i < Poseidon2.CellsOut) {
+      cells(i) = fadd(cells(i), BabyBear.fromRaw(digestWords(i)))
+      i += 1
+    }
+    Poseidon2.mix(cells)
+    observer.onOperation(VerifierOperationObserver.RngPermutation)
+    observer.onOperation(VerifierOperationObserver.RngCommit)
+  }
+
   def randomElem(): Int = {
     if (poolUsed == Poseidon2.CellsRate) {
       Poseidon2.mix(cells)
@@ -58,6 +82,20 @@ final class Poseidon2Rng {
     }
     val out = cells(poolUsed)
     poolUsed += 1
+    out
+  }
+
+  private[stark] def randomElem(observer: VerifierOperationObserver): Int = {
+    if (observer eq null) return randomElem()
+
+    if (poolUsed == Poseidon2.CellsRate) {
+      Poseidon2.mix(cells)
+      observer.onOperation(VerifierOperationObserver.RngPermutation)
+      poolUsed = 0
+    }
+    val out = cells(poolUsed)
+    poolUsed += 1
+    observer.onOperation(VerifierOperationObserver.RngElementDraw)
     out
   }
 
@@ -72,6 +110,29 @@ final class Poseidon2Rng {
     (((1L << bits) - 1) & (v.toLong & 0xFFFFFFFFL)).toInt
   }
 
+  private[stark] def randomBits(
+      bits: Int,
+      observer: VerifierOperationObserver): Int = {
+    if (observer eq null) return randomBits(bits)
+
+    var v = randomElem(observer)
+    var i = 0
+    while (i < 3) {
+      val nv = randomElem(observer)
+      if (v == 0) v = nv
+      i += 1
+    }
+    (((1L << bits) - 1) & (v.toLong & 0xFFFFFFFFL)).toInt
+  }
+
   def randomExtElem(): Ext4 =
     Ext4(randomElem(), randomElem(), randomElem(), randomElem())
+
+  private[stark] def randomExtElem(observer: VerifierOperationObserver): Ext4 =
+    if (observer eq null) randomExtElem()
+    else Ext4(
+      randomElem(observer),
+      randomElem(observer),
+      randomElem(observer),
+      randomElem(observer))
 }

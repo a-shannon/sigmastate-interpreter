@@ -63,7 +63,7 @@ final class MerkleVerifier private (
     top: Array[Array[Int]],
     rest: Array[Array[Int]]
 ) {
-  import MerkleVerifier.{hashPairRaw, toRawOwned}
+  import MerkleVerifier.{hashPairRaw, hashPairRawObserved, toRawOwned}
 
   /** Root digest in RAW word form (virtual node 1). */
   def rootRaw: Array[Int] = rootRawOwned.clone()
@@ -97,6 +97,52 @@ final class MerkleVerifier private (
                 val lowBit = i & 1
                 i /= 2
                 cur = if (lowBit == 1) hashPairRaw(other, cur) else hashPairRaw(cur, other)
+              }
+          }
+        }
+        if (failed != null) Left(failed)
+        else {
+          val present = if (i >= topSize) top(i - topSize) else rest(i - 1)
+          if (java.util.Arrays.equals(present, cur)) Right(row)
+          else Left("merkle branch: root path mismatch")
+        }
+    }
+  }
+
+  private[stark] def verify(
+      iop: ReadIop,
+      idx: Int,
+      observer: VerifierOperationObserver): Either[String, Array[Int]] = {
+    if (observer eq null) return verify(iop, idx)
+    if (idx < 0 || idx >= rowSize)
+      return Left(s"merkle query out of range: idx $idx, rows $rowSize")
+    iop.readFieldElemSlice(colSize) match {
+      case None => Left("merkle branch: bad row data (truncated or word >= P)")
+      case Some(row) =>
+        var cur = toRawOwned(Poseidon2.unpaddedHash(row, observer))
+        var i = idx + rowSize
+        var failed: String = null
+        while (failed == null && i >= 2 * topSize) {
+          iop.readDigestRaw() match {
+            case None => failed = "merkle branch: truncated path digest"
+            case Some(other) =>
+              if (!MerkleVerifier.allReduced(other))
+                failed = "merkle branch: unreduced path digest word"
+              else {
+                val lowBit = i & 1
+                i /= 2
+                cur = if (lowBit == 1)
+                  hashPairRawObserved(
+                    other,
+                    cur,
+                    observer,
+                    VerifierOperationObserver.MerkleQueryPairHash)
+                else
+                  hashPairRawObserved(
+                    cur,
+                    other,
+                    observer,
+                    VerifierOperationObserver.MerkleQueryPairHash)
               }
           }
         }
@@ -159,6 +205,54 @@ object MerkleVerifier {
     }
   }
 
+  private[stark] def create(
+      iop: ReadIop,
+      rowSize: Int,
+      colSize: Int,
+      queries: Int,
+      observer: VerifierOperationObserver): Either[String, MerkleVerifier] = {
+    if (observer eq null) return create(iop, rowSize, colSize, queries)
+    require(rowSize > 0 && (rowSize & (rowSize - 1)) == 0, s"rowSize not a power of 2: $rowSize")
+    require(colSize > 0, s"colSize must be positive: $colSize")
+    require(queries > 0, s"queries must be positive: $queries")
+
+    val layers = 31 - Integer.numberOfLeadingZeros(rowSize)
+    var topLayer = 0
+    var i = 1
+    while (i < layers && (1 << i) <= queries) { topLayer = i; i += 1 }
+    val topSize = 1 << topLayer
+
+    iop.readPodSlice(topSize) match {
+      case None => Left("merkle top row: truncated proof")
+      case Some(top) =>
+        if (!allDigestsReduced(top))
+          Left("merkle top row: unreduced digest word")
+        else {
+          val rest = new Array[Array[Int]](topSize - 1)
+          var n = topSize - 1
+          while (n >= topSize / 2 && n >= 1) {
+            rest(n - 1) = hashPairRawObserved(
+              top(2 * n - topSize),
+              top(2 * n + 1 - topSize),
+              observer,
+              VerifierOperationObserver.MerkleTopPairHash)
+            n -= 1
+          }
+          while (n >= 1) {
+            rest(n - 1) = hashPairRawObserved(
+              rest(2 * n - 1),
+              rest(2 * n),
+              observer,
+              VerifierOperationObserver.MerkleTopPairHash)
+            n -= 1
+          }
+          val verifier = new MerkleVerifier(rowSize, colSize, topSize, top, rest)
+          iop.commit(verifier.rootRawOwned, observer)
+          Right(verifier)
+        }
+    }
+  }
+
   /** True iff every word is a reduced residue (`< P` unsigned). */
   private def allReduced(digestRaw: Array[Int]): Boolean = {
     var i = 0
@@ -213,6 +307,16 @@ object MerkleVerifier {
       out(i) = BabyBear.toRaw(state(i))
       i += 1
     }
+    out
+  }
+
+  private def hashPairRawObserved(
+      aRaw: Array[Int],
+      bRaw: Array[Int],
+      observer: VerifierOperationObserver,
+      operationId: Int): Array[Int] = {
+    val out = hashPairRaw(aRaw, bRaw)
+    observer.onOperation(operationId)
     out
   }
 }

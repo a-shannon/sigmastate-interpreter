@@ -132,7 +132,16 @@ object FriVerifier {
       totCycles: Int,
       queries: Int,
       inner: Int => Either[String, Ext4],
-      probe: Probe = NoProbe): Either[String, Unit] = {
+      probe: Probe = NoProbe): Either[String, Unit] =
+    friVerify(iop, totCycles, queries, inner, probe, null)
+
+  private[stark] def friVerify(
+      iop: ReadIop,
+      totCycles: Int,
+      queries: Int,
+      inner: Int => Either[String, Ext4],
+      probe: Probe,
+      operationObserver: VerifierOperationObserver): Either[String, Unit] = {
     require(totCycles > 0 && (totCycles & (totCycles - 1)) == 0,
       s"totCycles not a power of 2: $totCycles")
     require(queries > 0, s"queries must be positive: $queries")
@@ -146,10 +155,13 @@ object FriVerifier {
     var failed: String = null
     while (failed == null && degree > FriMinDegree) {
       val rows = domain / FriFold
-      MerkleVerifier.create(iop, rows, FriFold * 4, queries) match {
+      MerkleVerifier.create(iop, rows, FriFold * 4, queries, operationObserver) match {
         case Left(e) => failed = s"fri round: $e"
         case Right(merkle) =>
-          rounds = new RoundInfo(rows, merkle, iop.randomExtElem()) :: rounds
+          rounds = new RoundInfo(
+            rows,
+            merkle,
+            iop.randomExtElem(operationObserver)) :: rounds
           domain /= FriFold
           degree /= FriFold
       }
@@ -162,7 +174,9 @@ object FriVerifier {
       case None => return Left("fri final poly: truncated or word >= P")
       case Some(cs) => cs
     }
-    iop.commit(Poseidon2.unpaddedHash(finalCoeffs).map(BabyBear.toRaw))
+    iop.commit(
+      Poseidon2.unpaddedHash(finalCoeffs, operationObserver).map(BabyBear.toRaw),
+      operationObserver)
     // Natural-order ext coefficients (plane-major on the wire).
     val finalExt = new Array[Ext4](degree)
     var i = 0
@@ -180,7 +194,7 @@ object FriVerifier {
     val posBits = log2Ceil(origDomain)
     var q = 0
     while (q < queries) {
-      var pos = iop.randomBits(posBits)
+      var pos = iop.randomBits(posBits, operationObserver)
       var goal: Ext4 = null
       inner(pos) match {
         case Left(e) => return Left(s"fri query $q inner: $e")
@@ -193,7 +207,7 @@ object FriVerifier {
         probe(q, r, pos, goal)
         val quot = pos / round.rows
         val group = pos % round.rows
-        round.merkle.verify(iop, group) match {
+        round.merkle.verify(iop, group, operationObserver) match {
           case Left(e) => return Left(s"fri query $q round $r: $e")
           case Right(row) =>
             val dataExt = new Array[Ext4](FriFold)
