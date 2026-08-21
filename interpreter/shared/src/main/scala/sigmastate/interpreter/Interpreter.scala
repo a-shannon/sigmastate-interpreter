@@ -876,6 +876,42 @@ trait Interpreter {
     reduceToCryptoJITC(context, proposition).getOrThrow
   }
 
+  private def continueClaimedV4Observed(
+      preflight: StarkPreflightResult,
+      observer: StarkPreflightContinuationObserver): ReductionResult = {
+    val continuation = preflight.takeContinuation()
+    observer.onContinuationTaken()
+    val useDirectErgoTree = continuation.useDirectErgoTree
+    if (useDirectErgoTree)
+      observer.onDirectPathSelected()
+    else
+      observer.onMaterializedPathSelected()
+    observer.onAvailabilityChecked()
+    enforceStarkAvailability(continuation.context, preflight.plan)
+    observer.onAvailabilityPassed()
+
+    if (useDirectErgoTree) {
+      continuation.proposition match {
+        case SigmaPropConstant(p) =>
+          observer.onConstantReductionEntered()
+          reduceSigmaPropConstant(continuation.context, p)
+        case _ =>
+          val ergoContext = continuation.context.asInstanceOf[ErgoLikeContext]
+          observer.onDirectEvaluatorEntered()
+          CErgoTreeEvaluator.evalToCrypto(
+            ergoContext,
+            continuation.ergoTree,
+            evalSettings)
+      }
+    }
+    else {
+      observer.onJitReductionEntered()
+      reduceToCryptoJITC(
+        continuation.context,
+        continuation.proposition).getOrThrow
+    }
+  }
+
   private def preflightV4(
       ergoTree: ErgoTree,
       proposition: SigmaPropValue,
@@ -1282,6 +1318,17 @@ object Interpreter {
     def onNodeRebuilt(): Unit
     def onProfileIdClassified(): Unit
     def onPlanBuilt(): Unit
+  }
+
+  private[interpreter] trait StarkPreflightContinuationObserver {
+    def onContinuationTaken(): Unit
+    def onDirectPathSelected(): Unit
+    def onMaterializedPathSelected(): Unit
+    def onAvailabilityChecked(): Unit
+    def onAvailabilityPassed(): Unit
+    def onConstantReductionEntered(): Unit
+    def onDirectEvaluatorEntered(): Unit
+    def onJitReductionEntered(): Unit
   }
 
   /** Structural classification of a materialized VerifyStark profileId.

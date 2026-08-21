@@ -390,14 +390,61 @@ structural rebuild work, event omission, event reordering, retained observer
 state, callback-exception wrapping, a forced rethrow of a soft-fork
 `ValidationException` and a cost-limit comparison changed from `>` to `>=`.
 
-This is a census of the v4 structural materialization trace, not of the whole
-preflight or its later consumption. In particular, `B` is emitted when the plan
-object is built, before proposition validation and construction of the
-continuation result; capability availability is checked later during
-continuation. The vector does not measure allocation, elapsed time, JVM
-instructions, consensus cost, node admission or native verification. It does
-not supply a stock positive, multi-host evidence or authority to close B4 or
-B5.
+This census ends with the v4 structural materialization trace. The continuation
+handoff is measured separately in the next subsection. In particular, `B` is
+emitted when the plan object is built, before proposition validation and
+construction of the continuation result; capability availability is checked
+during that later handoff. The vector does not measure allocation, elapsed time,
+JVM instructions, consensus cost, node admission or native verification. It
+does not supply a stock positive, multi-host evidence or authority to close B4
+or B5.
+
+## Preflight continuation handoff census
+
+`Eip0045PreflightContinuationCensusSpec` records the bounded handoff from a
+successful one-shot preflight result to its reduction frontier. Its payload-free
+symbols are `T` for a taken continuation, `D` or `M` for the selected direct or
+materialized route, `A` for the availability check, `P` for a passed check, and
+`C`, `E` or `J` for entry into constant reduction, the direct evaluator or JIT
+reduction. The exact successful vectors are `T,D,A,P,C`, `T,D,A,P,E` and
+`T,M,A,P,J`. With a non-empty plan and an unavailable capability, the direct
+route stops at `T,D,A` and the materialized route at `T,M,A`.
+
+Observed and ordinary unavailable continuations throw the same opcode and
+message. Successful `C`, `E` and `J` controls preserve both result value and
+cost. The available dead direct branch still returns true without a runtime
+call, while an empty plan passes the availability boundary. In the joined
+structural fixture, the V14 plan event `B` precedes `T` and the rest of the
+continuation vector.
+
+Consumption remains one-shot: a second use of the same preflight result throws
+the same `IllegalStateException` and records no event. `T` is emitted only after
+the successful take. The `C`, `E` and `J` callbacks occur before their respective
+reduction frontiers; `E` also follows a successful `ErgoLikeContext` cast.
+Exceptions from every callback propagate with object identity intact.
+
+The observed route uses one source-private helper. The ordinary continuation,
+availability, direct and materialized helpers remain observer-free, and their
+public ABI is unchanged across the checked Scala versions. The observer is not
+retained in result or interpreter state, and the route adds no global,
+`ThreadLocal`, default argument or exception wrapper.
+
+Twelve isolated mutation checks cover moving `T` before the take, omitting or
+duplicating `T`, inverting `D` and `M`, skipping availability enforcement,
+moving `P` before enforcement, moving `C` after constant reduction, moving `E`
+before the context cast or after evaluation, moving `J` after JIT reduction,
+retaining the observer and wrapping a callback exception.
+
+Before invoking the helper, the reflected JVM harness explicitly installs
+`versionedContext.activatedScriptVersion` and `tree.version` in
+`VersionContext`. The trace attests operation and branch order only; it does not
+attest the visibility, timing or duration of that version scope inside
+callbacks.
+
+This is neither a global execution trace nor a maximum event count. It does not
+measure allocation, timing, JVM instructions or consensus cost, demonstrate
+node or full-transaction execution, or enter the native verifier. It supplies
+no activation evidence or authority to close B4 or B5.
 
 ## What one run proves
 
