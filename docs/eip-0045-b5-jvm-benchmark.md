@@ -446,6 +446,41 @@ measure allocation, timing, JVM instructions or consensus cost, demonstrate
 node or full-transaction execution, or enter the native verifier. It supplies
 no activation evidence or authority to close B4 or B5.
 
+## Direct continuation-to-evaluator join census
+
+The direct-route fixture in `Eip0045PreflightContinuationCensusSpec` joins the
+V14 structural plan and V15 continuation traces to the first bounded V13
+evaluator operations. The tested tree contains one statically classified
+`VerifyStark`. Its requested profile differs only in the final byte from the
+single trusted snapshot entry, so the lookup is absent after comparing all 32
+bytes.
+
+The exact 44-event vector starts with `B,T,D,A,P,E`. It then records profile-ID
+evaluation, the successful dispatch charge, profile-ID validation and
+materialization, 32 byte comparisons, one entry comparison and lookup
+completion. The reduction returns false, matches the ordinary route's value and
+cost, and performs no runtime call.
+
+The test reaches `VerifyStark` through a live `CErgoTreeEvaluator`; it does not
+call `evalObserved` directly. At the first evaluator event it captures the
+current evaluator and confirms that it carries the exact test profiler. The
+dynamic evaluator scope is restored after success and after exceptions raised
+at each of the seven distinct evaluator callbacks in this route. Those
+exceptions propagate without wrapping or identity loss.
+
+One source-private continuation helper constructs the direct evaluator inline.
+The test sink travels through the evaluator's existing per-call `profiler`
+member. Production calls still use `DefaultProfiler`; no observer field,
+global, new `ThreadLocal`, default argument, wrapper or public evaluator entry
+is introduced. The ordinary continuation and evaluator entry signatures remain
+unchanged.
+
+This fixture covers one direct v4 tree and one absent-profile lookup. It does
+not cover the materialized JIT route, an Active profile body, the stock runtime,
+native verification, a full transaction or node path, or a global maximum. It
+does not measure allocation, elapsed time, JVM instructions or consensus cost,
+and it does not close B4 or B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process

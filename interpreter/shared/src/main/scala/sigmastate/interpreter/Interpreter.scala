@@ -7,7 +7,7 @@ import sigma.VersionContext
 import sigma.ast.SCollection.SByteArray
 import sigma.ast.syntax._
 import sigma.ast._
-import sigma.data.{CAND, COR, CTHRESHOLD, ProveDHTuple, ProveDlog, SigmaBoolean, TrivialProp}
+import sigma.data.{CAND, COR, CSigmaProp, CTHRESHOLD, ProveDHTuple, ProveDlog, SigmaBoolean, TrivialProp}
 import sigma.kiama.rewriting.Rewriter.{everywherebu, rule, strategy}
 import sigma.kiama.rewriting.Strategy
 import sigma.serialization.SigSerializer._
@@ -23,10 +23,11 @@ import sigmastate.interpreter.CErgoTreeEvaluator.fixedCostOp
 import sigmastate.interpreter.Interpreter._
 import sigma.ast.syntax.ValueOps
 import sigma.eval.StarkVerificationCapability.Unavailable
-import sigma.eval.{EvalSettings, SigmaDsl}
+import sigma.eval.{EvalSettings, Profiler, SigmaDsl}
 import sigma.exceptions.{CostLimitException, InterpreterException, OpcodeUnavailableException, StarkOpcodeErgoTreeVersionException}
 import sigma.interpreter.ProverResult
 import sigma.util.CollectionUtil
+import sigma.util.Extensions._
 import sigmastate.utils.Helpers._
 
 import scala.util.{Success, Try}
@@ -902,6 +903,64 @@ trait Interpreter {
             ergoContext,
             continuation.ergoTree,
             evalSettings)
+      }
+    }
+    else {
+      observer.onJitReductionEntered()
+      reduceToCryptoJITC(
+        continuation.context,
+        continuation.proposition).getOrThrow
+    }
+  }
+
+  /** Validation-only join from the observed direct continuation boundary into
+    * the evaluator's existing per-call profiler carrier. The ordinary helper
+    * graph remains observer-free.
+    */
+  private def continueClaimedV4RouteObserved(
+      preflight: StarkPreflightResult,
+      observer: StarkPreflightContinuationObserver,
+      evaluatorProfiler: Profiler): ReductionResult = {
+    val continuation = preflight.takeContinuation()
+    observer.onContinuationTaken()
+    val useDirectErgoTree = continuation.useDirectErgoTree
+    if (useDirectErgoTree)
+      observer.onDirectPathSelected()
+    else
+      observer.onMaterializedPathSelected()
+    observer.onAvailabilityChecked()
+    enforceStarkAvailability(continuation.context, preflight.plan)
+    observer.onAvailabilityPassed()
+
+    if (useDirectErgoTree) {
+      continuation.proposition match {
+        case SigmaPropConstant(p) =>
+          observer.onConstantReductionEntered()
+          reduceSigmaPropConstant(continuation.context, p)
+        case _ =>
+          val ergoContext = continuation.context.asInstanceOf[ErgoLikeContext]
+          observer.onDirectEvaluatorEntered()
+          val costAccumulator = new CostAccumulator(
+            initialCost = JitCost.fromBlockCost(ergoContext.initCost.toIntExact),
+            costLimit = Some(JitCost.fromBlockCost(ergoContext.costLimit.toIntExact)))
+          val evaluator = new CErgoTreeEvaluator(
+            ergoContext.toSigmaContext(),
+            continuation.ergoTree.constants,
+            costAccumulator,
+            evaluatorProfiler,
+            evalSettings,
+            ergoContext.starkVerificationCapability)
+          val result = evaluator.eval(
+            Map(),
+            continuation.ergoTree.toProposition(replaceConstants = false))
+          val sigmaBoolean = result match {
+            case sigmaProp: CSigmaProp => sigmaProp.wrappedValue
+            case value: SigmaBoolean  => value
+            case _ => sys.error(s"Expected SigmaBoolean but was: $result")
+          }
+          ReductionResult(
+            sigmaBoolean,
+            costAccumulator.totalCost.toBlockCost)
       }
     }
     else {

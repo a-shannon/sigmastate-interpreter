@@ -20,6 +20,62 @@ package sigma.eval {
   }
 }
 
+package sigma.ast {
+  import sigma.eval.Profiler
+
+  object Eip0045EvaluatorRouteProfiler {
+    def apply(record: String => Unit): Profiler = new RouteProfiler(record)
+
+    private final class RouteProfiler(record: String => Unit)
+        extends Profiler with VerifyStarkEvaluationObserver {
+      override def onBeforeNode(node: sigma.ast.syntax.SValue): Unit = ()
+      override def onAfterNode(node: sigma.ast.syntax.SValue): Unit = ()
+      override def addCostItem(costItem: CostItem, time: Long): Unit = ()
+      override def addJitEstimation(
+          script: String,
+          cost: JitCost,
+          actualTimeNano: Long): Unit = ()
+
+      override def onProfileIdEvaluated(): Unit = record("profile-id-evaluated")
+      override def onDispatchCharged(): Unit = record("dispatch-charged")
+      override def onProfileIdValidated(): Unit = record("profile-id-validated")
+      override def onProfileIdMaterialized(): Unit = record("profile-id-materialized")
+      override def onByteComparison(): Unit = record("byte-compared")
+      override def onEntryComparison(): Unit = record("entry-compared")
+      override def onLookupCompleted(): Unit = record("lookup-completed")
+      override def onActiveLifecycleSelected(): Unit =
+        record("active-lifecycle-selected")
+      override def onFixedCharged(): Unit = record("fixed-charged")
+      override def onProgramIdEvaluated(): Unit = record("program-id-evaluated")
+      override def onProgramIdValidated(): Unit = record("program-id-validated")
+      override def onApplicationPayloadEvaluated(): Unit =
+        record("application-payload-evaluated")
+      override def onApplicationPayloadValidated(): Unit =
+        record("application-payload-validated")
+      override def onProofChunksEvaluated(): Unit = record("proof-chunks-evaluated")
+      override def onProofChunkCountValidated(): Unit =
+        record("proof-chunk-count-validated")
+      override def onProofChunkValidated(): Unit = record("proof-chunk-validated")
+
+      override def onProofChunkMaterialized(): Unit =
+        record("proof-chunk-materialized")
+      override def onProgramIdMaterialized(): Unit =
+        record("program-id-materialized")
+      override def onApplicationPayloadMaterialized(): Unit =
+        record("application-payload-materialized")
+      override def onSelfPropositionBytesMaterialized(): Unit =
+        record("self-proposition-bytes-materialized")
+      override def onContractIdBuilt(): Unit = record("contract-id-built")
+      override def onStatementBuilt(): Unit = record("statement-built")
+      override def onJournalDigestBuilt(): Unit = record("journal-digest-built")
+      override def onTaggedStructDigestBuilt(): Unit =
+        record("tagged-struct-digest-built")
+      override def onOkClaimBuilt(): Unit = record("ok-claim-built")
+      override def onRawVerifierEntered(): Unit = record("raw-verifier-entered")
+    }
+  }
+}
+
 package sigmastate.interpreter {
   import java.lang.reflect.{InvocationTargetException, Method, Modifier}
   import org.ergoplatform.ErgoLikeContext
@@ -30,7 +86,7 @@ package sigmastate.interpreter {
   import sigma.ast._
   import sigma.ast.syntax.{SigmaPropValue, TrueSigmaProp}
   import sigma.data.TrivialProp
-  import sigma.eval.Eip0045ContinuationCensusRuntime
+  import sigma.eval.{Eip0045ContinuationCensusRuntime, EvalSettings, Profiler}
   import sigma.eval.StarkVerificationCapability
   import sigma.eval.StarkVerificationCapability._
   import sigma.exceptions.{CostLimitException, OpcodeUnavailableException}
@@ -54,12 +110,21 @@ package sigmastate.interpreter {
     private val DirectEvaluatorEntered = "direct-evaluator-entered"
     private val JitReductionEntered = "jit-reduction-entered"
     private val StructuralPlanBuilt = "structural-plan-built"
+    private val ProfileIdEvaluated = "profile-id-evaluated"
+    private val DispatchCharged = "dispatch-charged"
+    private val ProfileIdValidated = "profile-id-validated"
+    private val ProfileIdMaterialized = "profile-id-materialized"
+    private val ByteCompared = "byte-compared"
+    private val EntryCompared = "entry-compared"
+    private val LookupCompleted = "lookup-completed"
 
     private class RecordingObserver extends StarkPreflightContinuationObserver {
       private val recorded = scala.collection.mutable.ArrayBuffer.empty[String]
       def events: Vector[String] = recorded.toVector
 
       protected def record(event: String): Unit = recorded += event
+
+      final def recordRouteEvent(event: String): Unit = record(event)
 
       override def onContinuationTaken(): Unit = record(ContinuationTaken)
       override def onDirectPathSelected(): Unit = record(DirectPathSelected)
@@ -74,7 +139,7 @@ package sigmastate.interpreter {
       override def onJitReductionEntered(): Unit = record(JitReductionEntered)
     }
 
-    private final class JoinedObserver
+    private class JoinedObserver
         extends RecordingObserver with StarkPreflightOperationObserver {
       override def onNodeInspected(): Unit = ()
       override def onChildrenRead(): Unit = ()
@@ -90,6 +155,13 @@ package sigmastate.interpreter {
     private final class ThrowingObserver(
         target: String,
         sentinel: ObserverSentinel) extends RecordingObserver {
+      override protected def record(event: String): Unit =
+        if (event == target) throw sentinel else super.record(event)
+    }
+
+    private final class ThrowingJoinedObserver(
+        target: String,
+        sentinel: ObserverSentinel) extends JoinedObserver {
       override protected def record(event: String): Unit =
         if (event == target) throw sentinel else super.record(event)
     }
@@ -141,6 +213,12 @@ package sigmastate.interpreter {
     private def profileId(first: Int): Array[Byte] = {
       val result = new Array[Byte](ProfileIdBytes)
       result(0) = first.toByte
+      result
+    }
+
+    private def profileIdLast(last: Int): Array[Byte] = {
+      val result = new Array[Byte](ProfileIdBytes)
+      result(result.length - 1) = last.toByte
       result
     }
 
@@ -304,6 +382,52 @@ package sigmastate.interpreter {
       }
     }
 
+    private def observedRouteContinuationMethod: (Method, Boolean) = {
+      val helperSuffix = "continueClaimedV4RouteObserved"
+      val observerClass = classOf[StarkPreflightContinuationObserver]
+      val methods = interpreterMethodOwners.flatMap(_.getDeclaredMethods).filter {
+        method =>
+          val parameters = method.getParameterTypes
+          method.getName.endsWith(helperSuffix) &&
+            (parameters.length == 3 || parameters.length == 4) &&
+            parameters(parameters.length - 2) == observerClass &&
+            parameters.last == classOf[Profiler] &&
+            (parameters.length == 3 || parameters.head == classOf[Interpreter])
+      }.distinct
+      methods should have length 1
+      val method = methods.head
+      val receiverFirst = Modifier.isStatic(method.getModifiers)
+      method.setAccessible(true)
+      (method, receiverFirst)
+    }
+
+    private def observedRouteContinuation(interpreter: CensusInterpreter)(
+        tree: ErgoTree,
+        context: ErgoLikeContext,
+        preflight: interpreter.StarkPreflightResult,
+        observer: StarkPreflightContinuationObserver,
+        profiler: Profiler): Interpreter.ReductionResult = {
+      val versionedContext =
+        context.withErgoTreeVersion(tree.version).asInstanceOf[ErgoLikeContext]
+      VersionContext.withVersions(
+          versionedContext.activatedScriptVersion,
+          tree.version) {
+        val (method, receiverFirst) = observedRouteContinuationMethod
+        val arguments =
+          if (receiverFirst)
+            Array[AnyRef](interpreter, preflight, observer, profiler)
+          else
+            Array[AnyRef](preflight, observer, profiler)
+        try {
+          method.invoke(if (receiverFirst) null else interpreter, arguments: _*)
+            .asInstanceOf[Interpreter.ReductionResult]
+        }
+        catch {
+          case invocation: InvocationTargetException => throw invocation.getCause
+        }
+      }
+    }
+
     private def observedGenericContinuation(
         interpreter: GenericCensusInterpreter)(
         tree: ErgoTree,
@@ -438,6 +562,151 @@ package sigmastate.interpreter {
         DirectEvaluatorEntered)
       runtime.calls shouldBe 0
 
+      runtime.calls shouldBe 0
+    }
+
+    test("the direct continuation joins the absent-profile evaluator route") {
+      val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val tree = v4Tree(executableNode(profileIdLast(1)).toSigmaProp)
+      val context = contextFor(tree, activeSnapshot(runtime))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      observer.events shouldBe Vector(StructuralPlanBuilt)
+
+      var activeEvaluator: CErgoTreeEvaluator = null
+      val profiler = Eip0045EvaluatorRouteProfiler { event =>
+        if (event == ProfileIdEvaluated)
+          activeEvaluator = CErgoTreeEvaluator.getCurrentEvaluator
+        observer.recordRouteEvent(event)
+      }
+      val observed = observedRouteContinuation(interpreter)(
+        tree,
+        context,
+        preflight,
+        observer,
+        profiler)
+      val ordinary = ordinaryContinuation(new CensusInterpreter)(tree, context)
+
+      observed.value shouldBe ordinary.value
+      observed.cost shouldBe ordinary.cost
+      observed.value shouldBe TrivialProp.FalseProp
+      observer.events shouldBe (
+        Vector(
+          StructuralPlanBuilt,
+          ContinuationTaken,
+          DirectPathSelected,
+          AvailabilityChecked,
+          AvailabilityPassed,
+          DirectEvaluatorEntered,
+          ProfileIdEvaluated,
+          DispatchCharged,
+          ProfileIdValidated,
+          ProfileIdMaterialized) ++
+          Vector.fill(ProfileIdBytes)(ByteCompared) ++
+          Vector(EntryCompared, LookupCompleted))
+      activeEvaluator should not be null
+      activeEvaluator.profiler should be theSameInstanceAs profiler
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      runtime.calls shouldBe 0
+    }
+
+    test("evaluator-route callbacks propagate with identity and restore evaluator scope") {
+      val canonicalEvents =
+        Vector(
+          StructuralPlanBuilt,
+          ContinuationTaken,
+          DirectPathSelected,
+          AvailabilityChecked,
+          AvailabilityPassed,
+          DirectEvaluatorEntered,
+          ProfileIdEvaluated,
+          DispatchCharged,
+          ProfileIdValidated,
+          ProfileIdMaterialized) ++
+          Vector.fill(ProfileIdBytes)(ByteCompared) ++
+          Vector(EntryCompared, LookupCompleted)
+      val targets = Vector(
+        ProfileIdEvaluated,
+        DispatchCharged,
+        ProfileIdValidated,
+        ProfileIdMaterialized,
+        ByteCompared,
+        EntryCompared,
+        LookupCompleted)
+
+      targets.foreach { target =>
+        withClue(target + ": ") {
+          val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+          val tree = v4Tree(executableNode(profileIdLast(1)).toSigmaProp)
+          val context = contextFor(tree, activeSnapshot(runtime))
+          val interpreter = new CensusInterpreter
+          val sentinel = new ObserverSentinel
+          val observer = new ThrowingJoinedObserver(target, sentinel)
+          val preflight = successful(interpreter)(observedPreflight(interpreter)(
+            tree,
+            context,
+            observer))
+          val profiler = Eip0045EvaluatorRouteProfiler(observer.recordRouteEvent)
+
+          val failure = intercept[ObserverSentinel] {
+            observedRouteContinuation(interpreter)(
+              tree,
+              context,
+              preflight,
+              observer,
+              profiler)
+          }
+          failure should be theSameInstanceAs sentinel
+          observer.events shouldBe canonicalEvents.takeWhile(_ != target)
+          CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+          runtime.calls shouldBe 0
+        }
+      }
+    }
+
+    test("profile evaluation completes before the first joined evaluator event") {
+      val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val call = VerifyStark(
+        chunks(Array[Byte](4)),
+        ByteArrayConstant(Array[Byte](7, 8)),
+        ByteArrayConstant(profileId(9)),
+        ByIndex(chunks(Array[Byte](1)), IntConstant(1)))
+      val tree = v4Tree(call.toSigmaProp)
+      val context = contextFor(tree, activeSnapshot(runtime))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      val profiler = Eip0045EvaluatorRouteProfiler(observer.recordRouteEvent)
+
+      val observedFailure = intercept[IndexOutOfBoundsException] {
+        observedRouteContinuation(interpreter)(
+          tree,
+          context,
+          preflight,
+          observer,
+          profiler)
+      }
+      observer.events shouldBe Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        DirectPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        DirectEvaluatorEntered)
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      runtime.calls shouldBe 0
+
+      val ordinaryFailure = intercept[IndexOutOfBoundsException] {
+        ordinaryContinuation(new CensusInterpreter)(tree, context)
+      }
+      observedFailure.getClass shouldBe ordinaryFailure.getClass
       runtime.calls shouldBe 0
     }
 
@@ -771,12 +1040,12 @@ package sigmastate.interpreter {
         }
 
       val (observed, receiverFirst) = observedContinuationMethod
+      val (routeObserved, routeReceiverFirst) = observedRouteContinuationMethod
       val continuationObservedMethods = interpreterMethodOwners
         .flatMap(_.getDeclaredMethods)
         .filter(_.getParameterTypes.contains(observerClass))
         .distinct
-      continuationObservedMethods should have length 1
-      continuationObservedMethods.head shouldBe observed
+      continuationObservedMethods.toSet shouldBe Set(observed, routeObserved)
       val traitObserved = classOf[Interpreter].getDeclaredMethods
         .filter(_.getName == "continueClaimedV4Observed")
       traitObserved.foreach { method =>
@@ -788,6 +1057,17 @@ package sigmastate.interpreter {
       }
       interpreter.getClass.getDeclaredMethods
         .filter(_.getName == "continueClaimedV4Observed") shouldBe empty
+      val traitRouteObserved = classOf[Interpreter].getDeclaredMethods
+        .filter(_.getName == "continueClaimedV4RouteObserved")
+      traitRouteObserved.foreach { method =>
+        Modifier.isAbstract(method.getModifiers) shouldBe false
+      }
+      if (!routeReceiverFirst) {
+        traitRouteObserved should have length 1
+        Modifier.isPrivate(traitRouteObserved.head.getModifiers) shouldBe true
+      }
+      interpreter.getClass.getDeclaredMethods
+        .filter(_.getName == "continueClaimedV4RouteObserved") shouldBe empty
       val observedParameters = observed.getParameterTypes.toVector
       val preflightClass = classOf[interpreter.StarkPreflightResult]
       if (receiverFirst)
@@ -797,6 +1077,18 @@ package sigmastate.interpreter {
           observerClass)
       else
         observedParameters shouldBe Vector(preflightClass, observerClass)
+      val routeObservedParameters = routeObserved.getParameterTypes.toVector
+      if (routeReceiverFirst)
+        routeObservedParameters shouldBe Vector(
+          classOf[Interpreter],
+          preflightClass,
+          observerClass,
+          classOf[Profiler])
+      else
+        routeObservedParameters shouldBe Vector(
+          preflightClass,
+          observerClass,
+          classOf[Profiler])
 
       val ordinaryContinuationEntries = classOf[Interpreter].getDeclaredMethods
         .filter(_.getName == "continueFullReduction")
@@ -836,6 +1128,24 @@ package sigmastate.interpreter {
       }
       classOf[Interpreter].getDeclaredMethods
         .filter(_.getName == "continueFullReduction") should have length 1
+
+      val ordinaryEvaluatorEntries = CErgoTreeEvaluator.getClass
+        .getDeclaredMethods
+        .filter(_.getName == "evalToCrypto")
+      ordinaryEvaluatorEntries should have length 1
+      ordinaryEvaluatorEntries.head.getParameterTypes.toVector shouldBe Vector(
+        classOf[ErgoLikeContext],
+        classOf[ErgoTree],
+        classOf[EvalSettings])
+      val observedEvaluatorEntries = CErgoTreeEvaluator.getClass
+        .getDeclaredMethods
+        .filter(_.getName == "evalToCryptoObserved")
+      observedEvaluatorEntries shouldBe empty
+      CErgoTreeEvaluator.getClass.getDeclaredMethods.filter { method =>
+        Modifier.isPublic(method.getModifiers) &&
+          method.getParameterTypes.contains(classOf[Profiler])
+      } shouldBe empty
+
       val takeContinuationMethods = preflightClass.getDeclaredMethods
         .filter(_.getName.endsWith("takeContinuation"))
       takeContinuationMethods should have length 1

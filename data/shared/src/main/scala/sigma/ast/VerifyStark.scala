@@ -58,8 +58,13 @@ case class VerifyStark(
 
   override def opType: SFunc = VerifyStark.OpType
 
-  protected final override def eval(env: DataEnv)(implicit E: ErgoTreeEvaluator): Any =
-    evalImpl(env, null, null)
+  protected final override def eval(env: DataEnv)(implicit E: ErgoTreeEvaluator): Any = {
+    val evaluationObserver = E.profiler match {
+      case value: VerifyStarkEvaluationObserver => value
+      case _                                    => null
+    }
+    evalImpl(env, evaluationObserver, evaluationObserver)
+  }
 
   /** Validation-only route through the exact production evaluator body. */
   private[sigma] final def evalObserved(
