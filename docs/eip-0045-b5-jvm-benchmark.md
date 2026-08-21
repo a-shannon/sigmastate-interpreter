@@ -354,6 +354,51 @@ node admission or the complete transaction preflight. It supplies no matching
 stock receipt, positive evaluator result, multi-host campaign or authority to
 close B4 or B5.
 
+## Structural preflight operation census
+
+`Eip0045PreflightOperationCensusSpec` records one bounded source-level trace
+while the v4 materializer walks a canonical `VerifyStark` with four direct
+children. Using `I` for node inspection, `C` for a serializer-owned child read,
+`F` for a pushed frame, `U` for reuse of an unchanged node, `P` for profile-ID
+classification and `B` for plan construction, the exact 25-event vector is
+`I,C,F / I,C,F / I,C,F / I,C,C,U / I,C / I,C / I,C,C,U,P / C,U,B`.
+It contains seven inspections, ten child reads, three frame pushes, three
+unchanged-node reuses, one profile classification and one completed plan. The
+ten child reads include seven traversal reads and three serializer reads used
+to compare materialized children before those nodes are reused.
+
+Observed and ordinary calls produce the same plan, static profile ID and
+preflight block cost. With an unavailable capability, both continuations throw
+the same opcode and message before evaluator or runtime entry. The empty-plan
+control records `I,C,B`, preserves the cost and continues to the same true
+verdict. Exceptions raised by each of the seven callback kinds propagate with
+object identity intact.
+
+The observer is package-bounded, payload-free and passed only as a method
+parameter. Tests reach the source-private observed helper by reflection across
+Scala 2.11, 2.12 and 2.13; the ordinary two-argument route retains the
+historical observer-free helper graph. The observer is absent from the
+interpreter class hierarchy and result state, and there is no observer wrapper,
+global, `ThreadLocal` or default
+argument. The historical `Interpreter` method and descriptor set is unchanged
+in Scala 2.11, as are the checked concrete interpreter descriptor sets. No wire,
+evidence or benchmark schema changes.
+
+Focused mutation checks reject a duplicated structural traversal, duplicated
+profile classification, needless rebuilding of unchanged nodes, repeated
+structural rebuild work, event omission, event reordering, retained observer
+state, callback-exception wrapping, a forced rethrow of a soft-fork
+`ValidationException` and a cost-limit comparison changed from `>` to `>=`.
+
+This is a census of the v4 structural materialization trace, not of the whole
+preflight or its later consumption. In particular, `B` is emitted when the plan
+object is built, before proposition validation and construction of the
+continuation result; capability availability is checked later during
+continuation. The vector does not measure allocation, elapsed time, JVM
+instructions, consensus cost, node admission or native verification. It does
+not supply a stock positive, multi-host evidence or authority to close B4 or
+B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process

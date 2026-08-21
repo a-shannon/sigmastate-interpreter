@@ -12,19 +12,19 @@ import sigma.kiama.rewriting.Rewriter.{everywherebu, rule, strategy}
 import sigma.kiama.rewriting.Strategy
 import sigma.serialization.SigSerializer._
 import sigma.serialization.{SigSerializer, SigmaSerializer, ValueSerializer}
-import sigma.validation.SigmaValidationSettings
+import sigma.validation.{SigmaValidationSettings, ValidationException}
 import sigma.validation.ValidationRules.trySoftForkable
 import sigmastate.FiatShamirTree._
 import sigmastate._
 import sigmastate.crypto.DLogProtocol.{DLogProver, FirstDLogProverMessage}
 import sigmastate.crypto._
-import sigmastate.eval.{CProfiler, addCostChecked}
+import sigmastate.eval.{CProfiler, addCostChecked, msgCostLimitError}
 import sigmastate.interpreter.CErgoTreeEvaluator.fixedCostOp
 import sigmastate.interpreter.Interpreter._
 import sigma.ast.syntax.ValueOps
 import sigma.eval.StarkVerificationCapability.Unavailable
 import sigma.eval.{EvalSettings, SigmaDsl}
-import sigma.exceptions.{InterpreterException, OpcodeUnavailableException, StarkOpcodeErgoTreeVersionException}
+import sigma.exceptions.{CostLimitException, InterpreterException, OpcodeUnavailableException, StarkOpcodeErgoTreeVersionException}
 import sigma.interpreter.ProverResult
 import sigma.util.CollectionUtil
 import sigmastate.utils.Helpers._
@@ -248,6 +248,11 @@ trait Interpreter {
     var nextChild: Int = 0
   }
 
+  private final class StarkPreflightContextUpdater(
+      contextCell: MutableCell[CTX]) extends Function1[CTX, Unit] {
+    override def apply(updated: CTX): Unit = contextCell.value = updated
+  }
+
   private final class StarkContinuation(
       val ergoTree: ErgoTree,
       val context: CTX,
@@ -452,6 +457,216 @@ trait Interpreter {
 
     val occurrences = classifications.iterator.map(StarkPreflightOccurrence).toVector
     (finalResult, StarkPreflightPlan(occurrences))
+  }
+
+  private def structuralChildrenObserved(
+      term: SValue,
+      observer: StarkPreflightOperationObserver): Array[SValue] = {
+    val children = structuralChildren(term)
+    if (observer ne null)
+      observer.onChildrenRead()
+    children
+  }
+
+  private def rebuildWithChildrenObserved(
+      original: SValue,
+      children: Array[SValue],
+      observer: StarkPreflightOperationObserver): SValue = {
+    val serializer = ValueSerializer.getSerializer(original.opCode)
+    val originalChildren = serializer.valueChildren(original)
+    if (observer ne null)
+      observer.onChildrenRead()
+    var unchanged = originalChildren.length == children.length
+    var i = 0
+    while (unchanged && i < children.length) {
+      unchanged = originalChildren(i).asInstanceOf[AnyRef] eq
+        children(i).asInstanceOf[AnyRef]
+      i += 1
+    }
+    // Keeping an untouched node is both allocation-free and semantically
+    // important: structural preflight may classify an already constructed
+    // malformed shape without asking a validating deserialization builder to
+    // accept that shape a second time. Any actual child replacement still
+    // passes through the serializer-owned checked rebuild path.
+    if (unchanged) {
+      if (observer ne null)
+        observer.onNodeReused()
+      original
+    }
+    else {
+      val rebuilt = serializer
+        .rebuildValue(original, children.toIndexedSeq)
+        .asInstanceOf[SValue]
+      if (observer ne null)
+        observer.onNodeRebuilt()
+      rebuilt
+    }
+  }
+
+  private def classifyProfileIdObserved(
+      profileId: SValue,
+      constants: IndexedSeq[Constant[SType]],
+      observer: StarkPreflightOperationObserver): StarkProfileIdClassification = {
+    def classifyConstant(value: SValue): StarkProfileIdClassification = value match {
+      case ByteArrayConstant(bytes) if bytes.length == VerifyStark.DigestBytes =>
+        StaticStarkProfileId(bytes.toArray)
+      case _: Constant[_] =>
+        MalformedStarkProfileId
+      case _ =>
+        MalformedStarkProfileId
+    }
+
+    val classification = profileId match {
+      case constant: Constant[_] =>
+        classifyConstant(constant)
+      case placeholder: ConstantPlaceholder[_] =>
+        if (placeholder.tpe != SByteArray ||
+            placeholder.id < 0 || placeholder.id >= constants.length)
+          MalformedStarkProfileId
+        else
+          classifyConstant(constants(placeholder.id))
+      case _ =>
+        DynamicStarkProfileId
+    }
+    if (observer ne null)
+      observer.onProfileIdClassified()
+    classification
+  }
+
+  /** Iterative, occurrence-based v4+ materialization. There is deliberately no
+    * identity set or cycle/depth cap: a cyclic byte expansion creates fresh
+    * charged occurrences until the ordinary cost limit rejects it.
+    */
+  private def materializeV4Observed(
+      root: SValue,
+      contextCell: MutableCell[CTX],
+      constants: IndexedSeq[Constant[SType]],
+      observer: StarkPreflightOperationObserver): (SValue, StarkPreflightPlan) = {
+    val stack = ArrayBuffer.empty[MaterializationFrame]
+    val classifications = ArrayBuffer.empty[StarkProfileIdClassification]
+    var current: SValue = root
+    var finalResult: SValue = null
+    var finished = false
+    val updateContext = new StarkPreflightContextUpdater(contextCell)
+
+    while (!finished) {
+      var inspectReplacement = true
+      while (inspectReplacement) {
+        val registerDefault = current match {
+          case d: DeserializeRegister[_] =>
+            d.default match {
+              case Some(value) => Some(value.asInstanceOf[SValue])
+              case None => None
+            }
+          case _ =>
+            None
+        }
+        substDeserializeV4(
+          contextCell.value,
+          updateContext,
+          current) match {
+          case Some(replacement) =>
+            registerDefault match {
+              case Some(defaultValue) =>
+                // Register bytes determine the value retained in the
+                // materialized AST, but the syntactic default remains part
+                // of whole-input closure. The selected bytes have already
+                // been charged and parsed; materialize the shadowed default
+                // first, then the selected subtree, and retain child 1.
+                stack += new MaterializationFrame(
+                  current,
+                  Array[SValue](defaultValue, replacement),
+                  starkOccurrenceIndex = -1,
+                  selectedResultChild = 1)
+                if (observer ne null)
+                  observer.onFramePushed()
+                current = defaultValue
+              case None =>
+                current = replacement
+            }
+          case None =>
+            registerDefault match {
+              case Some(defaultValue) =>
+                // Missing or wrong-typed register input selects the
+                // ordinary syntactic default as the materialized value.
+                current = defaultValue
+              case None =>
+                inspectReplacement = false
+            }
+        }
+      }
+
+      if (observer ne null)
+        observer.onNodeInspected()
+      val occurrenceIndex = current match {
+        case _: VerifyStark =>
+          val index = classifications.length
+          // Filled when this occurrence has been completely materialized, so
+          // a profileId supplied by nested deserialization can become static.
+          classifications += null
+          index
+        case _ =>
+          -1
+      }
+
+      val children = structuralChildrenObserved(current, observer)
+      if (children.nonEmpty) {
+        val frame = new MaterializationFrame(current, children, occurrenceIndex)
+        stack += frame
+        if (observer ne null)
+          observer.onFramePushed()
+        current = children(0)
+      }
+      else {
+        var completed = current
+        if (occurrenceIndex >= 0) {
+          val call = completed.asInstanceOf[VerifyStark]
+          classifications(occurrenceIndex) =
+            classifyProfileIdObserved(call.profileId, constants, observer)
+        }
+
+        var ascending = true
+        while (ascending && !finished) {
+          if (stack.isEmpty) {
+            finalResult = completed
+            finished = true
+          }
+          else {
+            val frame = stack.last
+            frame.children(frame.nextChild) = completed
+            frame.nextChild += 1
+            if (frame.nextChild < frame.children.length) {
+              current = frame.children(frame.nextChild)
+              ascending = false
+            }
+            else {
+              stack.remove(stack.length - 1)
+              completed =
+                if (frame.selectedResultChild >= 0)
+                  frame.children(frame.selectedResultChild)
+                else
+                  rebuildWithChildrenObserved(frame.original, frame.children, observer)
+              if (frame.starkOccurrenceIndex >= 0) {
+                val call = completed.asInstanceOf[VerifyStark]
+                classifications(frame.starkOccurrenceIndex) =
+                  classifyProfileIdObserved(call.profileId, constants, observer)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    val occurrences = ArrayBuffer.empty[StarkPreflightOccurrence]
+    var occurrenceIndex = 0
+    while (occurrenceIndex < classifications.length) {
+      occurrences += StarkPreflightOccurrence(classifications(occurrenceIndex))
+      occurrenceIndex += 1
+    }
+    val plan = StarkPreflightPlan(occurrences.toVector)
+    if (observer ne null)
+      observer.onPlanBuilt()
+    (finalResult, plan)
   }
 
   private def rejectLegacyVerifyStark(ergoTreeVersion: Byte): Nothing =
@@ -699,6 +914,77 @@ trait Interpreter {
           contextCell,
           ergoTree.constants)
         Right((toValidScriptTypeJITC(root), plan))
+      }
+
+      materialized match {
+        case Left(terminal) => Left(terminal)
+        case Right((root, plan)) =>
+          Right(new StarkPreflightResult(
+            plan,
+            new StarkContinuation(
+              ergoTree,
+              contextCell.value,
+              root,
+              useDirectErgoTree = false)))
+      }
+    }
+  }
+
+  private def preflightV4Observed(
+      ergoTree: ErgoTree,
+      proposition: SigmaPropValue,
+      context: CTX,
+      observer: StarkPreflightOperationObserver): Either[ReductionResult, StarkPreflightResult] = {
+    val contextCell = new MutableCell(context)
+    if (!ergoTree.hasDeserialize) {
+      val materializedResult = materializeV4Observed(
+        proposition,
+        contextCell,
+        ergoTree.constants,
+        observer)
+      val materialized = materializedResult._1
+      val plan = materializedResult._2
+      val validProposition = toValidScriptTypeJITC(materialized)
+      Right(new StarkPreflightResult(
+        plan,
+        new StarkContinuation(
+          ergoTree,
+          contextCell.value,
+          validProposition,
+          useDirectErgoTree = true)))
+    }
+    else {
+      implicit val vs: SigmaValidationSettings = context.validationSettings
+      val deserializeSubstitutionCost = java7.compat.Math.multiplyExact(
+        ergoTree.bytes.length,
+        CostPerTreeByte)
+      val currCost = java7.compat.Math.addExact(
+        context.initCost,
+        deserializeSubstitutionCost)
+      if (currCost > context.costLimit)
+        throw new CostLimitException(
+          currCost,
+          msgCostLimitError(currCost, context.costLimit))
+      contextCell.value = context.withInitCost(currCost).asInstanceOf[CTX]
+
+      val materialized: Either[
+          ReductionResult,
+          (SigmaPropValue, StarkPreflightPlan)] = try {
+        val materializedResult = materializeV4Observed(
+          proposition,
+          contextCell,
+          ergoTree.constants,
+          observer)
+        val root = materializedResult._1
+        val plan = materializedResult._2
+        Right((toValidScriptTypeJITC(root), plan))
+      }
+      catch {
+        case error: ValidationException =>
+          if (vs.isSoftFork(error))
+            Left(WhenSoftForkReductionResult(contextCell.value.initCost))
+          else
+            throw error
       }
 
       materialized match {
@@ -987,6 +1273,16 @@ trait Interpreter {
 object Interpreter {
   final val VerifyStarkMinErgoTreeVersion: Int =
     VersionContext.StarkVerificationVersion.toInt
+
+  private[interpreter] trait StarkPreflightOperationObserver {
+    def onNodeInspected(): Unit
+    def onChildrenRead(): Unit
+    def onFramePushed(): Unit
+    def onNodeReused(): Unit
+    def onNodeRebuilt(): Unit
+    def onProfileIdClassified(): Unit
+    def onPlanBuilt(): Unit
+  }
 
   /** Structural classification of a materialized VerifyStark profileId.
     * Classification never evaluates the expression.
