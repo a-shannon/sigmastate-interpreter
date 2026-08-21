@@ -262,13 +262,13 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/VerifierOperationObserver.scala",
-      "sha256": "cb26510f1175552d3414e1a1408e8c272442f4710d0c8ff4e6b9f4ca2cded481",
+      "sha256": "3d11e63ecc087fef6c7778353e29ae5ef6b9ac07665341b08ead09db31a64ed4",
       "provenance": "original",
       "sources": [],
       "transformations": [
         "Original EIP-0045 validation-only operation observer by A. Shannon.",
-        "Uses package-bounded integer event IDs without proof payloads, stored state, thread-local state, or public API exposure.",
-        "Defines a null no-probe sink so production verifier overloads retain their historical path."
+        "Uses sigma-package-bounded integer event IDs without proof payloads, stored state, or thread-local state.",
+        "Extends source visibility from the stark subtree to the enclosing sigma package without changing the existing JVM descriptor, and defines a null no-probe sink for the ordinary verifier path."
       ]
     },
     {
@@ -412,7 +412,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/Risc0RawSealVerifier.scala",
-      "sha256": "8679cdd42339fabb6860320fc8ff77bbb37f9170244505fc3d32ae21a4968f63",
+      "sha256": "23fb188445c7719aac00a706b07293c735dbd4a3e5956ce5ea95de82e85e712d",
       "provenance": "substantially-adapted",
       "sources": [
         "arkadia:SuccinctVerifier",
@@ -429,7 +429,8 @@
         "Removed bincode receipt parsing, host receipt wrappers, caller-selected control programs, and generic control-set inclusion.",
         "Added direct fixed raw-seal input, manifest-owned exact control-ID matching, derived segment exponent, late inner-root/claim checks, strict EOF, immutable validated profile snapshots, exact TapSet coverage/distinctness checks, canonical PolyExt constants, fixed circuit/opcode censuses, and typed proof rejection.",
         "Kept profile construction faults distinct from proof-controlled failures, routes the owned validated constraint-program snapshot through the sole PolyExt arithmetic kernel, and exposed only bounded checkpoint instrumentation.",
-        "Routes the validation probe's package-bounded operation sink through direct-verifier primitives while the production no-probe path supplies null and retains no observer state."
+        "Routes the validation probe's package-bounded operation sink through direct-verifier primitives while the production no-probe path supplies null and retains no observer state.",
+        "Adds a package-bounded operation-only adapter for the full evaluator route; its final no-op checkpoint callback keeps labels and proof-derived arrays inside the raw verifier, while the ordinary two-argument entry still installs NoProbe."
       ]
     }
   ],

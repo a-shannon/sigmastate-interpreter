@@ -525,6 +525,43 @@ verification, a full transaction or node path, or a global maximum. It does not
 measure allocation, elapsed time, JVM instructions or consensus cost, and it
 does not close B4 or B5.
 
+## Full-route verifier-operation join census
+
+The full-route fixture uses the canonical direct v4 reference contract. Context
+variable 0 supplies the four chunks of the retained po2-15 seal and variable 1
+supplies the application payload. The authenticated B1/B2/B3 package selects the
+stock runtime. Raw verification completes before the host-derived claim is
+rejected, so the Sigma result remains false.
+
+The joined route starts with `B,T,D,A,P,E`, then records the 65 Active evaluator
+and pre-verifier events through `raw-verifier-entered`. The first raw-verifier
+operation follows that entry event. Its exact seven-family vector is
+`217/4050/353/1384/12/244/32`: Merkle top-pair hashes, Merkle query-pair hashes,
+content-hash calls, content-hash permutations, RNG commits, RNG element draws
+and RNG permutations. This is 6,292 callbacks and 5,683 observed Poseidon2
+permutations.
+
+The observed and ordinary continuations return the same false value and charge
+the same cost. An exception from the first operation callback propagates as the
+same object, and the current-evaluator scope is clear afterward. The test also
+checks that long-lived runtime and raw-verifier objects hold no operation
+observer, probe or `ThreadLocal` field.
+
+The operation sink accepts one integer and no proof payload. Its source
+visibility covers the enclosing `sigma` package; the existing JVM descriptor is
+unchanged. The raw verifier wraps it in an internal `OperationOnlyProbe` whose
+checkpoint callback is a final no-op. The composite profiler is never a
+`Probe`, so checkpoint labels and proof-derived arrays do not cross into the
+evaluator profiler. The stock runtime selects this adapter only in its observed
+branch. Its ordinary helper and the raw verifier's two-argument `NoProbe` entry
+remain separate.
+
+This fixture covers one negative direct v4 route and seven operation families.
+It supplies no stock positive or B4 receipt and is not a complete operation,
+allocation or peak-live census. It does not measure elapsed time, JVM
+instructions or consensus cost, choose `dispatchJit` or `fixedJit`, exercise a
+full transaction or node, close B5, or authorize activation.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process

@@ -20,6 +20,89 @@ package sigma.eval {
   }
 }
 
+package sigma.stark {
+  import sigma.ast.{CostItem, JitCost, VerifyStarkEvaluationObserver}
+  import sigma.ast.syntax.SValue
+  import sigma.eval.Profiler
+
+  object Eip0045FullRouteOperationProfiler {
+    def canonicalChunkLengths: Array[Int] =
+      profile.RawSealV1Decoder.canonicalChunkLengths
+
+    def operationObserverClass: Class[_] = classOf[VerifierOperationObserver]
+
+    def canonicalOperationIds: Vector[Int] =
+      Vector(
+        VerifierOperationObserver.MerkleTopPairHash,
+        VerifierOperationObserver.MerkleQueryPairHash,
+        VerifierOperationObserver.ContentHashCall,
+        VerifierOperationObserver.ContentHashPermutation,
+        VerifierOperationObserver.RngCommit,
+        VerifierOperationObserver.RngElementDraw,
+        VerifierOperationObserver.RngPermutation)
+
+    def apply(
+        recordRoute: String => Unit,
+        recordOperation: Int => Unit): Profiler =
+      new FullRouteOperationProfiler(recordRoute, recordOperation)
+
+    private final class FullRouteOperationProfiler(
+        recordRoute: String => Unit,
+        recordOperation: Int => Unit)
+        extends Profiler
+        with VerifyStarkEvaluationObserver
+        with VerifierOperationObserver {
+      override def onBeforeNode(node: SValue): Unit = ()
+      override def onAfterNode(node: SValue): Unit = ()
+      override def addCostItem(costItem: CostItem, time: Long): Unit = ()
+      override def addJitEstimation(
+          script: String,
+          cost: JitCost,
+          actualTimeNano: Long): Unit = ()
+
+      override def onProfileIdEvaluated(): Unit = recordRoute("profile-id-evaluated")
+      override def onDispatchCharged(): Unit = recordRoute("dispatch-charged")
+      override def onProfileIdValidated(): Unit = recordRoute("profile-id-validated")
+      override def onProfileIdMaterialized(): Unit = recordRoute("profile-id-materialized")
+      override def onByteComparison(): Unit = recordRoute("byte-compared")
+      override def onEntryComparison(): Unit = recordRoute("entry-compared")
+      override def onLookupCompleted(): Unit = recordRoute("lookup-completed")
+      override def onActiveLifecycleSelected(): Unit =
+        recordRoute("active-lifecycle-selected")
+      override def onFixedCharged(): Unit = recordRoute("fixed-charged")
+      override def onProgramIdEvaluated(): Unit = recordRoute("program-id-evaluated")
+      override def onProgramIdValidated(): Unit = recordRoute("program-id-validated")
+      override def onApplicationPayloadEvaluated(): Unit =
+        recordRoute("application-payload-evaluated")
+      override def onApplicationPayloadValidated(): Unit =
+        recordRoute("application-payload-validated")
+      override def onProofChunksEvaluated(): Unit = recordRoute("proof-chunks-evaluated")
+      override def onProofChunkCountValidated(): Unit =
+        recordRoute("proof-chunk-count-validated")
+      override def onProofChunkValidated(): Unit = recordRoute("proof-chunk-validated")
+
+      override def onProofChunkMaterialized(): Unit =
+        recordRoute("proof-chunk-materialized")
+      override def onProgramIdMaterialized(): Unit =
+        recordRoute("program-id-materialized")
+      override def onApplicationPayloadMaterialized(): Unit =
+        recordRoute("application-payload-materialized")
+      override def onSelfPropositionBytesMaterialized(): Unit =
+        recordRoute("self-proposition-bytes-materialized")
+      override def onContractIdBuilt(): Unit = recordRoute("contract-id-built")
+      override def onStatementBuilt(): Unit = recordRoute("statement-built")
+      override def onJournalDigestBuilt(): Unit = recordRoute("journal-digest-built")
+      override def onTaggedStructDigestBuilt(): Unit =
+        recordRoute("tagged-struct-digest-built")
+      override def onOkClaimBuilt(): Unit = recordRoute("ok-claim-built")
+      override def onRawVerifierEntered(): Unit = recordRoute("raw-verifier-entered")
+
+      override def onOperation(operationId: Int): Unit =
+        recordOperation(operationId)
+    }
+  }
+}
+
 package sigma.ast {
   import sigma.eval.Profiler
 
@@ -77,7 +160,9 @@ package sigma.ast {
 }
 
 package sigmastate.interpreter {
+  import java.io.ByteArrayOutputStream
   import java.lang.reflect.{InvocationTargetException, Method, Modifier}
+  import java.nio.charset.StandardCharsets
   import org.ergoplatform.ErgoLikeContext
   import org.scalatest.funsuite.AnyFunSuite
   import org.scalatest.matchers.should.Matchers
@@ -86,12 +171,15 @@ package sigmastate.interpreter {
   import sigma.ast._
   import sigma.ast.syntax.{SigmaPropValue, TrueSigmaProp}
   import sigma.data.TrivialProp
-  import sigma.eval.{Eip0045ContinuationCensusRuntime, EvalSettings, Profiler}
+  import sigma.eval.{Eip0045ContinuationCensusRuntime, EvalSettings, Profiler, Risc0StockProfileRuntime, StarkProfileRuntime}
   import sigma.eval.StarkVerificationCapability
   import sigma.eval.StarkVerificationCapability._
   import sigma.exceptions.{CostLimitException, OpcodeUnavailableException}
   import sigma.interpreter.ContextExtension
   import sigma.serialization.ValueSerializer
+  import sigma.serialization.Eip0045ReferenceContract
+  import sigma.stark.Eip0045FullRouteOperationProfiler
+  import sigma.stark.profile.{Risc0ProfilePackageLoader, Risc0RawSealVerifier}
   import sigma.validation.{ReplacedRule, ValidationException}
   import sigma.validation.ValidationRules.CheckPositionLimit
   import sigmastate.helpers.{ErgoLikeContextTesting, ErgoLikeTestInterpreter}
@@ -119,6 +207,78 @@ package sigmastate.interpreter {
     private val ByteCompared = "byte-compared"
     private val EntryCompared = "entry-compared"
     private val LookupCompleted = "lookup-completed"
+    private val ActiveLifecycleSelected = "active-lifecycle-selected"
+    private val FixedCharged = "fixed-charged"
+    private val ProgramIdEvaluated = "program-id-evaluated"
+    private val ProgramIdValidated = "program-id-validated"
+    private val ApplicationPayloadEvaluated = "application-payload-evaluated"
+    private val ApplicationPayloadValidated = "application-payload-validated"
+    private val ProofChunksEvaluated = "proof-chunks-evaluated"
+    private val ProofChunkCountValidated = "proof-chunk-count-validated"
+    private val ProofChunkValidated = "proof-chunk-validated"
+    private val ProofChunkMaterialized = "proof-chunk-materialized"
+    private val ProgramIdMaterialized = "program-id-materialized"
+    private val ApplicationPayloadMaterialized = "application-payload-materialized"
+    private val SelfPropositionBytesMaterialized = "self-proposition-bytes-materialized"
+    private val ContractIdBuilt = "contract-id-built"
+    private val StatementBuilt = "statement-built"
+    private val JournalDigestBuilt = "journal-digest-built"
+    private val TaggedStructDigestBuilt = "tagged-struct-digest-built"
+    private val OkClaimBuilt = "ok-claim-built"
+    private val RawVerifierEntered = "raw-verifier-entered"
+    private val FirstVerifierOperation = "first-verifier-operation"
+
+    private val CanonicalActiveRouteEvents =
+      Vector(
+        ProfileIdEvaluated,
+        DispatchCharged,
+        ProfileIdValidated,
+        ProfileIdMaterialized) ++
+        Vector.fill(ProfileIdBytes)(ByteCompared) ++
+        Vector(
+          EntryCompared,
+          LookupCompleted,
+          ActiveLifecycleSelected,
+          FixedCharged,
+          ProgramIdEvaluated,
+          ProgramIdValidated,
+          ApplicationPayloadEvaluated,
+          ApplicationPayloadValidated,
+          ProofChunksEvaluated,
+          ProofChunkCountValidated) ++
+        Vector.fill(Eip0045FullRouteOperationProfiler.canonicalChunkLengths.length)(
+          ProofChunkValidated) ++
+        Vector(
+          ProofChunkMaterialized,
+          ProofChunkMaterialized,
+          ProofChunkMaterialized,
+          ProofChunkMaterialized,
+          ProgramIdMaterialized,
+          ApplicationPayloadMaterialized,
+          SelfPropositionBytesMaterialized,
+          ContractIdBuilt,
+          StatementBuilt,
+          JournalDigestBuilt,
+          TaggedStructDigestBuilt,
+          TaggedStructDigestBuilt,
+          TaggedStructDigestBuilt,
+          OkClaimBuilt,
+          RawVerifierEntered)
+
+    private val CanonicalDirectActivePrefix =
+      Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        DirectPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        DirectEvaluatorEntered) ++ CanonicalActiveRouteEvents
+
+    private val FullOperationCounts = Vector(217, 4050, 353, 1384, 12, 244, 32)
+    private val PackageRoot = "/stark-kats/eip0045-profile-package/"
+    private val DirectRoot = "/stark-kats/eip0045-direct/"
+    private val ReferencePayload =
+      "v18-full-route-operation-census".getBytes(StandardCharsets.UTF_8)
 
     private class RecordingObserver extends StarkPreflightContinuationObserver {
       private val recorded = scala.collection.mutable.ArrayBuffer.empty[String]
@@ -224,6 +384,58 @@ package sigmastate.interpreter {
       result
     }
 
+    private def resourceBytes(path: String): Array[Byte] = {
+      val in = getClass.getResourceAsStream(path)
+      require(in != null, "missing test resource " + path)
+      val out = new ByteArrayOutputStream()
+      val buffer = new Array[Byte](8192)
+      try {
+        var read = in.read(buffer)
+        while (read >= 0) {
+          if (read > 0) out.write(buffer, 0, read)
+          read = in.read(buffer)
+        }
+        out.toByteArray
+      } finally {
+        in.close()
+        out.close()
+      }
+    }
+
+    private lazy val loadedProfile = Risc0ProfilePackageLoader.load(
+      resourceBytes(PackageRoot + "manifest.bin"),
+      resourceBytes(PackageRoot + "algorithm.txt"),
+      resourceBytes(PackageRoot + "constants.bin"),
+      resourceBytes(PackageRoot + "profile-id.bin")) match {
+      case Right(value) => value
+      case Left(failure) => fail("frozen B1/B2/B3 package rejected: " + failure)
+    }
+
+    private lazy val rawSeal = resourceBytes(DirectRoot + "po2-15-raw-seal.bin")
+
+    private def canonicalChunks(bytes: Array[Byte]): Array[Array[Byte]] = {
+      val lengths = Eip0045FullRouteOperationProfiler.canonicalChunkLengths
+      val result = new Array[Array[Byte]](lengths.length)
+      var offset = 0
+      var i = 0
+      while (i < lengths.length) {
+        result(i) = java.util.Arrays.copyOfRange(bytes, offset, offset + lengths(i))
+        offset += lengths(i)
+        i += 1
+      }
+      result
+    }
+
+    private def stockRuntime: Risc0StockProfileRuntime =
+      right(Risc0StockProfileRuntime.fromLoadedProfile(loadedProfile))
+
+    private def referenceExtension(proof: Array[Array[Byte]]): ContextExtension =
+      ContextExtension(Map(
+        0.toByte -> ConcreteCollection[SByteArray](
+          proof.iterator.map(ByteArrayConstant(_)).toIndexedSeq,
+          SByteArray),
+        1.toByte -> ByteArrayConstant(ReferencePayload)))
+
     private def chunks(values: Array[Byte]*):
         Value[SCollection[SCollection[SByte.type]]] =
       ConcreteCollection[SByteArray](
@@ -257,8 +469,7 @@ package sigmastate.interpreter {
       case Left(failure) => fail("unexpected capability rejection: " + failure)
     }
 
-    private def activeSnapshot(
-        runtime: Eip0045ContinuationCensusRuntime): Snapshot = {
+    private def activeSnapshot(runtime: StarkProfileRuntime): Snapshot = {
       val entry = right(active(runtime, fixedJit = 200))
       right(snapshot(
         Array.tabulate[Byte](ProfileIdBytes)(_.toByte),
@@ -668,6 +879,130 @@ package sigmastate.interpreter {
       activeEvaluator.profiler should be theSameInstanceAs profiler
       CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
       runtime.calls shouldBe 0
+    }
+
+    test("the direct continuation joins raw entry to the complete verifier-operation census") {
+      val tree = Eip0045ReferenceContract.buildTree()
+      val proof = canonicalChunks(rawSeal)
+      val context = contextFor(
+        tree,
+        activeSnapshot(stockRuntime),
+        referenceExtension(proof))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      observer.events shouldBe Vector(StructuralPlanBuilt)
+
+      val operationCounts = Array.fill(FullOperationCounts.length)(0)
+      var operationCallbacks = 0
+      var activeEvaluator: CErgoTreeEvaluator = null
+      val profiler = Eip0045FullRouteOperationProfiler(
+        event => {
+          if (event == ProfileIdEvaluated)
+            activeEvaluator = CErgoTreeEvaluator.getCurrentEvaluator
+          observer.recordRouteEvent(event)
+        },
+        operationId => {
+          operationId should (be >= 1 and be <= operationCounts.length)
+          if (operationCallbacks == 0)
+            observer.recordRouteEvent(FirstVerifierOperation)
+          operationCounts(operationId - 1) += 1
+          operationCallbacks += 1
+        })
+      val observed = observedRouteContinuation(interpreter)(
+        tree,
+        context,
+        preflight,
+        observer,
+        profiler)
+      val ordinary = ordinaryContinuation(new CensusInterpreter)(tree, context)
+
+      observed.value shouldBe ordinary.value
+      observed.cost shouldBe ordinary.cost
+      observed.value shouldBe TrivialProp.FalseProp
+      CanonicalActiveRouteEvents.length shouldBe 65
+      CanonicalDirectActivePrefix.length shouldBe 71
+      operationCounts.toVector shouldBe FullOperationCounts
+      operationCallbacks shouldBe FullOperationCounts.sum
+      FullOperationCounts.sum shouldBe 6292
+      (FullOperationCounts(0) + FullOperationCounts(1) +
+        FullOperationCounts(3) + FullOperationCounts(6)) shouldBe 5683
+      observer.events shouldBe (CanonicalDirectActivePrefix :+ FirstVerifierOperation)
+      classOf[Risc0RawSealVerifier.Probe].isAssignableFrom(profiler.getClass) shouldBe false
+      activeEvaluator should not be null
+      activeEvaluator.profiler should be theSameInstanceAs profiler
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+    }
+
+    test("the first full-route operation exception preserves identity and evaluator scope") {
+      val tree = Eip0045ReferenceContract.buildTree()
+      val context = contextFor(
+        tree,
+        activeSnapshot(stockRuntime),
+        referenceExtension(canonicalChunks(rawSeal)))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      val sentinel = new ObserverSentinel
+      val profiler = Eip0045FullRouteOperationProfiler(
+        observer.recordRouteEvent,
+        _ => throw sentinel)
+
+      val failure = intercept[ObserverSentinel] {
+        observedRouteContinuation(interpreter)(
+          tree,
+          context,
+          preflight,
+          observer,
+          profiler)
+      }
+
+      failure should be theSameInstanceAs sentinel
+      observer.events shouldBe CanonicalDirectActivePrefix
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+    }
+
+    test("the full-route operation seam is integer-only and retained by no long-lived state") {
+      val operationObserverClass =
+        Eip0045FullRouteOperationProfiler.operationObserverClass
+      val threadLocalClass = classOf[ThreadLocal[_]]
+      val probeClass = classOf[Risc0RawSealVerifier.Probe]
+
+      operationObserverClass.getDeclaredFields.toSeq shouldBe empty
+      val operationMethods = operationObserverClass.getDeclaredMethods
+      val operationCallbacks = operationMethods.filter(_.getParameterCount == 1)
+      operationCallbacks.map(_.getName).toSeq shouldBe Seq("onOperation")
+      Eip0045FullRouteOperationProfiler.canonicalOperationIds shouldBe (1 to 7)
+      val operationMethod = operationCallbacks.head
+      operationMethod.getParameterTypes.toSeq shouldBe Seq(java.lang.Integer.TYPE)
+      operationMethod.getReturnType shouldBe java.lang.Void.TYPE
+
+      Seq(
+        classOf[Risc0RawSealVerifier],
+        classOf[Risc0StockProfileRuntime]).foreach { owner =>
+        owner.getDeclaredFields.foreach { field =>
+          operationObserverClass.isAssignableFrom(field.getType) shouldBe false
+          probeClass.isAssignableFrom(field.getType) shouldBe false
+          threadLocalClass.isAssignableFrom(field.getType) shouldBe false
+        }
+      }
+
+      val observedEntries = classOf[Risc0RawSealVerifier].getDeclaredMethods
+        .filter(_.getName == "verifyObservedOperations")
+      observedEntries should have length 1
+      observedEntries.head.getParameterTypes.toSeq shouldBe Seq(
+        classOf[Array[Array[Byte]]],
+        classOf[Array[Byte]],
+        operationObserverClass)
+      val ordinaryEntries = classOf[Risc0RawSealVerifier].getDeclaredMethods
+        .filter(method => method.getName == "verify" && method.getParameterCount == 2)
+      ordinaryEntries should have length 1
     }
 
     test("evaluator-route callbacks propagate with identity and restore evaluator scope") {

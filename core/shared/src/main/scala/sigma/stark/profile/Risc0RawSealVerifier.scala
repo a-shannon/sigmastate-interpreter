@@ -81,6 +81,18 @@ final class Risc0RawSealVerifier private[profile] (
       case Right(decoded) => verifyDecoded(decoded, expectedClaim, probe)
     }
 
+  /** [[verify]] with only the payload-free operation IDs exposed to a
+    * package-bounded validation observer. Checkpoint labels and values remain
+    * inside this verifier.
+    */
+  private[sigma] def verifyObservedOperations(
+      proofChunks: Array[Array[Byte]],
+      expectedClaim: Array[Byte],
+      observer: VerifierOperationObserver): Either[Failure, Verified] = {
+    if (observer == null) invariant("verifier operation observer is null")
+    verify(proofChunks, expectedClaim, new OperationOnlyProbe(observer))
+  }
+
   /** Verify a decoder-produced word stream. This overload exists so the
     * opcode adapter can keep transport parsing and cryptographic execution as
     * explicit phases without copying the 222,668-byte seal.
@@ -630,6 +642,13 @@ object Risc0RawSealVerifier {
     private[stark] def operationSinkOrNull: VerifierOperationObserver = null
   }
   object NoProbe extends Probe
+
+  private final class OperationOnlyProbe(observer: VerifierOperationObserver)
+      extends Probe {
+    override final def onCheckpoint(label: String, values: Array[Int]): Unit = ()
+    override private[stark] final def operationSinkOrNull: VerifierOperationObserver =
+      observer
+  }
 
   private final case class StarkResult(
       out: Array[Int],

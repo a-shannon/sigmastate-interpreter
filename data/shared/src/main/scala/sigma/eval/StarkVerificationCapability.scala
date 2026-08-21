@@ -7,6 +7,7 @@ package sigma.eval
 
 import sigma.ast.JitCost
 import sigma.exceptions.StarkProfileRuntimeException
+import sigma.stark.VerifierOperationObserver
 import sigma.stark.profile.{RawSealV1Decoder, Risc0ClaimBuilder, Risc0ProfilePackageLoader, StarkPreVerifierObserver}
 
 /** Trusted, invocation-specific host capability for EIP-0045 verification.
@@ -375,13 +376,28 @@ final class Risc0StockProfileRuntime private (
       applicationPayload: Array[Byte],
       proofChunks: Array[Array[Byte]],
       observer: StarkPreVerifierObserver): Boolean =
-    verifyImpl(
+    Risc0ClaimBuilder.buildObserved(
+      loadedProfile,
       chainDomainId,
       programId,
       contractId,
       applicationPayload,
-      proofChunks,
-      observer)
+      observer) match {
+      case Left(failure) =>
+        throw new StarkProfileRuntimeException(
+          "Authenticated RISC0 runtime rejected host-bound claim input: " + failure.code)
+      case Right(binding) =>
+        if (observer ne null) observer.onRawVerifierEntered()
+        observer match {
+          case operationObserver: VerifierOperationObserver =>
+            loadedProfile.verifier.verifyObservedOperations(
+              proofChunks,
+              binding.expectedClaim,
+              operationObserver).isRight
+          case _ =>
+            loadedProfile.verifier.verify(proofChunks, binding.expectedClaim).isRight
+        }
+    }
 
   private def verifyImpl(
       chainDomainId: Array[Byte],

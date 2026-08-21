@@ -11,11 +11,11 @@ package sigma.stark
   * payload. Production verification passes `null`; diagnostic callers may
   * supply an observer whose exceptions intentionally propagate.
   */
-private[stark] trait VerifierOperationObserver {
+private[sigma] trait VerifierOperationObserver {
   def onOperation(operationId: Int): Unit
 }
 
-private[stark] object VerifierOperationObserver {
+private[sigma] object VerifierOperationObserver {
   final val MerkleTopPairHash: Int = 1
   final val MerkleQueryPairHash: Int = 2
   final val ContentHashCall: Int = 3
