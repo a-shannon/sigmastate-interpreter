@@ -92,6 +92,8 @@ package sigmastate.interpreter {
   import sigma.exceptions.{CostLimitException, OpcodeUnavailableException}
   import sigma.interpreter.ContextExtension
   import sigma.serialization.ValueSerializer
+  import sigma.validation.{ReplacedRule, ValidationException}
+  import sigma.validation.ValidationRules.CheckPositionLimit
   import sigmastate.helpers.{ErgoLikeContextTesting, ErgoLikeTestInterpreter}
   import sigmastate.helpers.TestingHelpers.createBox
   import sigmastate.interpreter.Interpreter.{
@@ -614,6 +616,60 @@ package sigmastate.interpreter {
       runtime.calls shouldBe 0
     }
 
+    test("the materialized continuation joins the absent-profile evaluator route") {
+      val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val tree = materializedTree
+      val context = materializedContext(
+        tree,
+        executableNode(profileIdLast(1)),
+        activeSnapshot(runtime))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      preflight.plan.occurrences should have size 1
+      interpreter.v4DeserializeCalls shouldBe 1
+      observer.events shouldBe Vector(StructuralPlanBuilt)
+
+      var activeEvaluator: CErgoTreeEvaluator = null
+      val profiler = Eip0045EvaluatorRouteProfiler { event =>
+        if (event == ProfileIdEvaluated)
+          activeEvaluator = CErgoTreeEvaluator.getCurrentEvaluator
+        observer.recordRouteEvent(event)
+      }
+      val observed = observedRouteContinuation(interpreter)(
+        tree,
+        context,
+        preflight,
+        observer,
+        profiler)
+      val ordinary = ordinaryContinuation(new CensusInterpreter)(tree, context)
+
+      observed.value shouldBe ordinary.value
+      observed.cost shouldBe ordinary.cost
+      observed.value shouldBe TrivialProp.FalseProp
+      observer.events shouldBe (
+        Vector(
+          StructuralPlanBuilt,
+          ContinuationTaken,
+          MaterializedPathSelected,
+          AvailabilityChecked,
+          AvailabilityPassed,
+          JitReductionEntered,
+          ProfileIdEvaluated,
+          DispatchCharged,
+          ProfileIdValidated,
+          ProfileIdMaterialized) ++
+          Vector.fill(ProfileIdBytes)(ByteCompared) ++
+          Vector(EntryCompared, LookupCompleted))
+      activeEvaluator should not be null
+      activeEvaluator.profiler should be theSameInstanceAs profiler
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      runtime.calls shouldBe 0
+    }
+
     test("evaluator-route callbacks propagate with identity and restore evaluator scope") {
       val canonicalEvents =
         Vector(
@@ -668,6 +724,154 @@ package sigmastate.interpreter {
       }
     }
 
+    test("materialized evaluator-route callbacks preserve identity and restore scope") {
+      val canonicalEvents =
+        Vector(
+          StructuralPlanBuilt,
+          ContinuationTaken,
+          MaterializedPathSelected,
+          AvailabilityChecked,
+          AvailabilityPassed,
+          JitReductionEntered,
+          ProfileIdEvaluated,
+          DispatchCharged,
+          ProfileIdValidated,
+          ProfileIdMaterialized) ++
+          Vector.fill(ProfileIdBytes)(ByteCompared) ++
+          Vector(EntryCompared, LookupCompleted)
+      val targets = Vector(
+        ProfileIdEvaluated,
+        DispatchCharged,
+        ProfileIdValidated,
+        ProfileIdMaterialized,
+        ByteCompared,
+        EntryCompared,
+        LookupCompleted)
+
+      targets.foreach { target =>
+        withClue(target + ": ") {
+          val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+          val tree = materializedTree
+          val context = materializedContext(
+            tree,
+            executableNode(profileIdLast(1)),
+            activeSnapshot(runtime))
+          val interpreter = new CensusInterpreter
+          val sentinel = new ObserverSentinel
+          val observer = new ThrowingJoinedObserver(target, sentinel)
+          val preflight = successful(interpreter)(observedPreflight(interpreter)(
+            tree,
+            context,
+            observer))
+          val profiler = Eip0045EvaluatorRouteProfiler(observer.recordRouteEvent)
+
+          val failure = intercept[ObserverSentinel] {
+            observedRouteContinuation(interpreter)(
+              tree,
+              context,
+              preflight,
+              observer,
+              profiler)
+          }
+          failure should be theSameInstanceAs sentinel
+          observer.events shouldBe canonicalEvents.takeWhile(_ != target)
+          CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+          runtime.calls shouldBe 0
+        }
+      }
+    }
+
+    test("the materialized evaluator route preserves its soft-fork boundary") {
+      val nonSoftRuntime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val tree = materializedTree
+      val nonSoftContext = materializedContext(
+        tree,
+        executableNode(profileIdLast(1)),
+        activeSnapshot(nonSoftRuntime))
+      val nonSoftInterpreter = new CensusInterpreter
+      val nonSoftObserver = new JoinedObserver
+      val nonSoftPreflight = successful(nonSoftInterpreter)(
+        observedPreflight(nonSoftInterpreter)(
+          tree,
+          nonSoftContext,
+          nonSoftObserver))
+      val nonSoftError = ValidationException(
+        "non-soft evaluator callback",
+        CheckPositionLimit,
+        Seq.empty[Any])
+      nonSoftContext.validationSettings.isSoftFork(nonSoftError) shouldBe false
+      val nonSoftProfiler = Eip0045EvaluatorRouteProfiler { event =>
+        if (event == ProfileIdEvaluated)
+          throw nonSoftError
+        nonSoftObserver.recordRouteEvent(event)
+      }
+
+      val nonSoftFailure = intercept[ValidationException] {
+        observedRouteContinuation(nonSoftInterpreter)(
+          tree,
+          nonSoftContext,
+          nonSoftPreflight,
+          nonSoftObserver,
+          nonSoftProfiler)
+      }
+      nonSoftFailure should be theSameInstanceAs nonSoftError
+      nonSoftObserver.events shouldBe Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        MaterializedPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        JitReductionEntered)
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      nonSoftRuntime.calls shouldBe 0
+
+      val softRuntime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val softBaseContext = materializedContext(
+        tree,
+        executableNode(profileIdLast(1)),
+        activeSnapshot(softRuntime))
+      val softSettings = softBaseContext.validationSettings.updated(
+        CheckPositionLimit.id,
+        ReplacedRule((CheckPositionLimit.id + 1).toShort))
+      val softContext = softBaseContext.withValidationSettings(softSettings)
+      val softInterpreter = new CensusInterpreter
+      val softObserver = new JoinedObserver
+      val softPreflight = successful(softInterpreter)(
+        observedPreflight(softInterpreter)(
+          tree,
+          softContext,
+          softObserver))
+      val expectedSoftForkCost = softPreflight.preflightBlockCost
+      val softError = ValidationException(
+        "soft evaluator callback",
+        CheckPositionLimit,
+        Seq.empty[Any])
+      softContext.validationSettings.isSoftFork(softError) shouldBe true
+      val softProfiler = Eip0045EvaluatorRouteProfiler { event =>
+        if (event == ProfileIdEvaluated)
+          throw softError
+        softObserver.recordRouteEvent(event)
+      }
+
+      val softResult = observedRouteContinuation(softInterpreter)(
+        tree,
+        softContext,
+        softPreflight,
+        softObserver,
+        softProfiler)
+      softResult.value shouldBe TrivialProp.TrueProp
+      softResult.cost shouldBe expectedSoftForkCost
+      softObserver.events shouldBe Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        MaterializedPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        JitReductionEntered)
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      softRuntime.calls shouldBe 0
+    }
+
     test("profile evaluation completes before the first joined evaluator event") {
       val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
       val call = VerifyStark(
@@ -700,6 +904,48 @@ package sigmastate.interpreter {
         AvailabilityChecked,
         AvailabilityPassed,
         DirectEvaluatorEntered)
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+      runtime.calls shouldBe 0
+
+      val ordinaryFailure = intercept[IndexOutOfBoundsException] {
+        ordinaryContinuation(new CensusInterpreter)(tree, context)
+      }
+      observedFailure.getClass shouldBe ordinaryFailure.getClass
+      runtime.calls shouldBe 0
+    }
+
+    test("materialized profile evaluation completes before its first joined event") {
+      val runtime = new Eip0045ContinuationCensusRuntime(profileId(0))
+      val call = VerifyStark(
+        chunks(Array[Byte](4)),
+        ByteArrayConstant(Array[Byte](7, 8)),
+        ByteArrayConstant(profileId(9)),
+        ByIndex(chunks(Array[Byte](1)), IntConstant(1)))
+      val tree = materializedTree
+      val context = materializedContext(tree, call, activeSnapshot(runtime))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      val profiler = Eip0045EvaluatorRouteProfiler(observer.recordRouteEvent)
+
+      val observedFailure = intercept[IndexOutOfBoundsException] {
+        observedRouteContinuation(interpreter)(
+          tree,
+          context,
+          preflight,
+          observer,
+          profiler)
+      }
+      observer.events shouldBe Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        MaterializedPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        JitReductionEntered)
       CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
       runtime.calls shouldBe 0
 

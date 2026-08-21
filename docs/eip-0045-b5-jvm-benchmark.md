@@ -481,6 +481,50 @@ native verification, a full transaction or node path, or a global maximum. It
 does not measure allocation, elapsed time, JVM instructions or consensus cost,
 and it does not close B4 or B5.
 
+## Materialized continuation-to-evaluator join census
+
+The materialized-route fixture uses a v4 outer tree whose proposition is
+`DeserializeContext(1, SBoolean)`. Context extension 1 supplies one
+`VerifyStark`, so preflight builds a one-occurrence plan before the proposition
+enters JIT reduction. The requested profile differs only in the final byte from
+the single trusted snapshot entry. The lookup therefore compares all 32 bytes
+and finds no matching profile.
+
+The 44-event vector starts with `B,T,M,A,P,J`. It then records profile-ID
+evaluation, the successful dispatch charge, profile-ID validation and
+materialization, 32 byte comparisons, one entry comparison and lookup
+completion. The reduction returns false, matches the ordinary route's value and
+cost, performs one v4 materialization and makes no runtime call.
+
+The observed continuation invokes a live `CErgoTreeEvaluator` on the
+materialized proposition. At the first evaluator event, the current evaluator
+carries the exact per-call test profiler. Its current-evaluator scope is clear
+after successful evaluation and after an exception from each of the seven
+distinct evaluator callbacks. Every callback exception propagates without
+wrapping or identity loss. A separate failing `ByIndex` profile expression
+stops before the first evaluator event and has the same exception class as the
+ordinary route.
+
+The validation-only branch constructs the materialized evaluator inside the
+existing source-private continuation helper. Its `ValidationException` handling
+matches the ordinary route's soft-fork decision. Two injected callback failures
+cover the tolerated and rethrown branches, including exception identity and the
+preflight cost retained by the soft-fork result. The branch does not change
+`reduceToCryptoJITC`, `continueMaterializedV4`, `CErgoTreeEvaluator` or
+`VerifyStark`, and it adds no observer storage, global, `ThreadLocal`, default
+argument, exception wrapper or public evaluator entry.
+
+Eight isolated mutations replace the supplied profiler, omit or delay the JIT
+marker, evaluate twice, discard the initial cost, evaluate the outer tree
+instead of the materialized proposition, or force either soft-fork outcome.
+The focused fixture rejects each mutation.
+
+This fixture covers one materialized v4 proposition and one absent-profile
+lookup. It does not cover an Active profile body, the stock runtime, native
+verification, a full transaction or node path, or a global maximum. It does not
+measure allocation, elapsed time, JVM instructions or consensus cost, and it
+does not close B4 or B5.
+
 ## What one run proves
 
 A successful run is digest-bound evidence for one verifier build, JVM process

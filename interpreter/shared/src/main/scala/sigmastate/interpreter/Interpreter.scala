@@ -965,9 +965,36 @@ trait Interpreter {
     }
     else {
       observer.onJitReductionEntered()
-      reduceToCryptoJITC(
-        continuation.context,
-        continuation.proposition).getOrThrow
+      try {
+        val ergoContext = continuation.context.asInstanceOf[ErgoLikeContext]
+        val costAccumulator = new CostAccumulator(
+          initialCost = JitCost.fromBlockCost(ergoContext.initCost.toIntExact),
+          costLimit = Some(JitCost.fromBlockCost(ergoContext.costLimit.toIntExact)))
+        val evaluator = new CErgoTreeEvaluator(
+          ergoContext.toSigmaContext(),
+          ErgoTree.EmptyConstants,
+          costAccumulator,
+          evaluatorProfiler,
+          evalSettings,
+          ergoContext.starkVerificationCapability)
+        val result = evaluator.eval(Map(), continuation.proposition)
+        val sigmaProp = result match {
+          case value: sigma.SigmaProp => value
+          case value =>
+            sys.error(
+              s"Invalid result type of $value: expected SigmaProp when evaluating ${continuation.proposition}")
+        }
+        ReductionResult(
+          SigmaDsl.toSigmaBoolean(sigmaProp),
+          costAccumulator.totalCost.toBlockCost.toLong)
+      }
+      catch {
+        case error: ValidationException =>
+          if (continuation.context.validationSettings.isSoftFork(error))
+            WhenSoftForkReductionResult(continuation.context.initCost)
+          else
+            throw error
+      }
     }
   }
 
