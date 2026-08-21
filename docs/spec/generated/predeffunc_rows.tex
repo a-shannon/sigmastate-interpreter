@@ -64,7 +64,10 @@
  of discrete logarithm signature protocol.
          \\
  \hline
-          206 & \hyperref[sec:serialization:operation:CreateProveDHTuple]{\lst{CreateProveDHTuple}} & \parbox{4cm}{\lst{proveDHTuple:} \\ \lst{(GroupElement, GroupElement, GroupElement, GroupElement)} \\ \lst{  => SigmaProp}} & ... \\
+          206 & \hyperref[sec:serialization:operation:CreateProveDHTuple]{\lst{CreateProveDHTuple}} & \parbox{4cm}{\lst{proveDHTuple:} \\ \lst{(GroupElement, GroupElement, GroupElement, GroupElement)} \\ \lst{  => SigmaProp}} &  ErgoTree operation to create a new SigmaProp value representing public key
+ of Diffie Hellman signature protocol.
+ Common input: (g,h,u,v)
+         \\
  \hline
           209 & \hyperref[sec:serialization:operation:BoolToSigmaProp]{\lst{BoolToSigmaProp}} & \parbox{4cm}{\lst{sigmaProp:} \\ \lst{(Boolean)} \\ \lst{  => SigmaProp}} & ... \\
  \hline
