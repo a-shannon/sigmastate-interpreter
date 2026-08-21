@@ -106,10 +106,10 @@ ThisBuild / dynverSonatypeSnapshots := true
 // use "-" instead of default "+"
 ThisBuild / dynverSeparator := "-"
 
-val bouncycastleBcprov = "org.bouncycastle" % "bcprov-jdk15on" % "1.70"
+val bouncycastleBcprov = "org.bouncycastle" % "bcprov-jdk15to18" % "1.85.1"
 
 val scryptoDependency =
-  libraryDependencies += "org.scorexfoundation" %%% "scrypto" % "3.0.0"
+  libraryDependencies += "org.scorexfoundation" %%% "scrypto" % "3.1.1"
 
 val scorexUtilDependency =
   libraryDependencies += "org.scorexfoundation" %%% "scorex-util" % "0.2.1"
