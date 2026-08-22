@@ -40,10 +40,11 @@ import scala.util.control.NonFatal
   * Full benchmark campaigns run explicitly with `coreJVM/Test/runMain`. The
   * object is not itself a ScalaTest suite; focused support tests call it only
   * for bounded zero-warmup, one-sample smoke runs. Each run authenticates the
-  * frozen B1/B2/B3 package through the production loader, validates all six
-  * scenario paths, warms them in a
-  * rotating schedule, then records one complete verifier invocation per
-  * sample. It never derives or recommends a consensus fixedJit value.
+  * frozen B1/B2/B3 package through the production loader. Normal runs validate
+  * all six scenario paths; an explicitly non-campaign diagnostic can select
+  * exactly one. The selected set is warmed in a rotating schedule, then one
+  * complete verifier invocation is recorded per sample. The harness never
+  * derives or recommends a consensus fixedJit value.
   */
 object Eip0045VerifierBenchmark {
   private val PackageRoot = "/stark-kats/eip0045-profile-package/"
@@ -63,6 +64,7 @@ object Eip0045VerifierBenchmark {
   private[benchmark] trait ExecutionObserver {
     def beforeVerifierSetup(): Unit
     def beforeOutput(): Unit
+    def beforeThreadAllocationMeterOpen(): Unit = ()
     def beforeValidationInvocation(): Unit = ()
     def beforeWarmupInvocation(): Unit = ()
     def beforeTimedInvocation(): Unit = ()
@@ -224,7 +226,7 @@ object Eip0045VerifierBenchmark {
 
   private[benchmark] def currentEnvironmentForTest(
       declaredCpuModel: String): EnvironmentMetadata = {
-    val meter = openThreadAllocationMeter()
+    val meter = openThreadAllocationMeter(NoExecutionObserver)
     val memoryPools = openMemoryPoolTopology(PlatformMemoryPoolSource)
     environmentMetadata(
       Config(0, 1, None, Some(declaredCpuModel), "commit:" + ("0" * 40), None, None),
@@ -249,7 +251,7 @@ object Eip0045VerifierBenchmark {
       args: Array[String],
       observer: ExecutionObserver,
       memoryPoolSource: MemoryPoolSource): Unit = {
-    if (args != null && args.contains("--help")) {
+    if (args != null && args.length == 1 && args(0) == "--help") {
       System.out.print(Usage)
       return
     }
@@ -260,8 +262,9 @@ object Eip0045VerifierBenchmark {
         System.err.print(Usage)
         throw new IllegalArgumentException(detail)
     }
+    validateDiagnosticScenario(config.diagnosticScenario)
 
-    val allocationMeter = openThreadAllocationMeter()
+    val allocationMeter = openThreadAllocationMeter(observer)
     val memoryPools = openMemoryPoolTopology(memoryPoolSource)
     val environment = environmentMetadata(
       config,
@@ -272,7 +275,9 @@ object Eip0045VerifierBenchmark {
     // Campaign policy is fully resolved before profile resources are loaded or
     // any verifier object can be constructed or invoked.
     val fixture = loadFixture(observer)
-    val scenarios = buildScenarios(fixture)
+    val scenarios = selectScenarios(
+      buildScenarios(fixture),
+      config.diagnosticScenario)
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
@@ -310,6 +315,19 @@ object Eip0045VerifierBenchmark {
         allocationSummary)
     }.toVector
 
+    val baseLimitations = campaignBinding match {
+      case Some(_) => ExpectedCampaignLimitations
+      case None => ExpectedCampaignLimitations.dropRight(1) :+
+        "No campaign manifest or run ID is bound, so this diagnostic is not acceptable campaign evidence."
+    }
+    val scenarioScopedLimitations = config.diagnosticScenario match {
+      case Some(_) => baseLimitations.map {
+        case "Validation invokes every scenario before warmup, so zero warmup rounds are not a cold-start measurement." =>
+          "Validation invokes the selected scenario before warmup, so zero warmup rounds are not a cold-start measurement."
+        case limitation => limitation
+      } :+ "Diagnostic scenario selection excludes the other five fixed scenarios; this run is not complete campaign evidence."
+      case None => baseLimitations
+    }
     val payload = EvidencePayload(
       startedAtUtc = startedAt,
       benchmarkDurationNs = duration,
@@ -324,11 +342,7 @@ object Eip0045VerifierBenchmark {
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = measurements.garbageCollectorDeltas,
       memoryPoolPhaseEnvelopes = measurements.memoryPoolPhaseEnvelopes,
-      limitations = (campaignBinding match {
-        case Some(_) => ExpectedCampaignLimitations
-        case None => ExpectedCampaignLimitations.dropRight(1) :+
-          "No campaign manifest or run ID is bound, so this diagnostic is not acceptable campaign evidence."
-      }) ++
+      limitations = scenarioScopedLimitations ++
         (if (config.implementationRevision == "unrecorded")
           Vector("implementationRevision is unrecorded, so this run is not acceptable campaign evidence.")
         else Vector.empty))
@@ -366,6 +380,12 @@ object Eip0045VerifierBenchmark {
       case _ =>
         throw new IllegalArgumentException(
           "campaign manifest and run ID must be supplied together")
+    }
+
+  private def validateDiagnosticScenario(selected: Option[String]): Unit =
+    selected.foreach { id =>
+      if (!ExpectedScenarios.exists(_.id == id))
+        throw new IllegalArgumentException("unknown diagnostic scenario")
     }
 
   private def readBoundedCampaignManifest(pathText: String): Array[Byte] = {
@@ -627,6 +647,18 @@ object Eip0045VerifierBenchmark {
           independentValidChunks,
           fixture.independent.expectedClaim,
           probe)))
+  }
+
+  private def selectScenarios(
+      scenarios: Vector[Scenario],
+      selected: Option[String]): Vector[Scenario] = selected match {
+    case None => scenarios
+    case Some(id) =>
+      val matching = scenarios.filter(_.id == id)
+      if (matching.length != 1)
+        throw new IllegalStateException(
+          "diagnostic scenario selection does not match the fixed scenario set")
+      matching
   }
 
   private[benchmark] def operationCensusScenariosForTest(): Vector[Scenario] =
@@ -945,7 +977,9 @@ object Eip0045VerifierBenchmark {
     value.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
   }
 
-  private def openThreadAllocationMeter(): ThreadAllocationMeter = {
+  private def openThreadAllocationMeter(
+      observer: ExecutionObserver): ThreadAllocationMeter = {
+    observer.beforeThreadAllocationMeterOpen()
     val platformBean = ManagementFactory.getThreadMXBean
     val bean = platformBean match {
       case value: com.sun.management.ThreadMXBean => value

@@ -27,6 +27,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
   final val MaxSampleRounds: Int = 10000
   final val MaxCampaignManifestBytes: Int = 1024 * 1024
   final val MaxCampaignRunIdCharacters: Int = 128
+  final val MaxDiagnosticScenarioIdCharacters: Int = 64
   final val MaxJvmInputArguments: Int = 1024
   final val MaxJvmInputArgumentBytes: Int = 64 * 1024
   final val MaxJvmInputArgumentsTotalBytes: Int = 1024 * 1024
@@ -39,7 +40,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
       declaredCpuModel: Option[String],
       implementationRevision: String,
       campaignManifestPath: Option[String],
-      campaignRunId: Option[String])
+      campaignRunId: Option[String],
+      diagnosticScenario: Option[String] = None)
 
   final case class ResourceMetadata(
       id: String,
@@ -158,6 +160,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
       |                      Enforce an exact manifest run policy; requires --campaign-run-id
       |  --campaign-run-id ID
       |                      Public manifest run ID; requires --campaign-manifest
+      |  --diagnostic-scenario ID
+      |                      Measure one named scenario; incompatible with campaign mode
       |  --help              Show this help
       |""".stripMargin
 
@@ -171,6 +175,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
     var implementationRevision = "unrecorded"
     var campaignManifestPath: Option[String] = None
     var campaignRunId: Option[String] = None
+    var diagnosticScenario: Option[String] = None
     var seenWarmup = false
     var seenSamples = false
     var seenOutput = false
@@ -178,6 +183,7 @@ private[benchmark] object Eip0045BenchmarkSupport {
     var seenRevision = false
     var seenCampaignManifest = false
     var seenCampaignRunId = false
+    var seenDiagnosticScenario = false
     var i = 0
     while (i < args.length) {
       val option = args(i)
@@ -268,12 +274,30 @@ private[benchmark] object Eip0045BenchmarkSupport {
           campaignRunId = Some(normalized)
           seenCampaignRunId = true
           i += 2
+        case "--diagnostic-scenario" =>
+          if (seenDiagnosticScenario)
+            return Left("duplicate option --diagnostic-scenario")
+          val value = nextValue(args, i, option) match {
+            case Right(v) => v
+            case Left(e)  => return Left(e)
+          }
+          if (!isValidDiagnosticScenarioId(value))
+            return Left(
+              "--diagnostic-scenario must be 1-" +
+                MaxDiagnosticScenarioIdCharacters +
+                " characters using only lowercase ASCII letters, digits, or '-'")
+          diagnosticScenario = Some(value)
+          seenDiagnosticScenario = true
+          i += 2
         case "--help" =>
           return Left("--help must be handled before argument parsing")
         case _ =>
           return Left("unknown option at argument index " + i)
       }
     }
+    if (diagnosticScenario.isDefined &&
+        (campaignManifestPath.isDefined || campaignRunId.isDefined))
+      return Left("--diagnostic-scenario cannot be combined with campaign options")
     if (campaignManifestPath.isDefined != campaignRunId.isDefined)
       return Left("--campaign-manifest and --campaign-run-id must be supplied together")
     if (campaignManifestPath.isDefined && implementationRevision == "unrecorded")
@@ -287,7 +311,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
       cpuModel,
       implementationRevision,
       campaignManifestPath,
-      campaignRunId))
+      campaignRunId,
+      diagnosticScenario))
   }
 
   private def nextValue(
@@ -339,6 +364,16 @@ private[benchmark] object Eip0045BenchmarkSupport {
       (ch >= 'A' && ch <= 'Z') ||
       (ch >= '0' && ch <= '9') ||
       ch == '.' || ch == '_' || ch == ':' || ch == '-'
+    }
+  }
+
+  private[benchmark] def isValidDiagnosticScenarioId(value: String): Boolean = {
+    if (value == null || value.isEmpty ||
+        value.length > MaxDiagnosticScenarioIdCharacters) false
+    else value.forall { ch =>
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= '0' && ch <= '9') ||
+      ch == '-'
     }
   }
 

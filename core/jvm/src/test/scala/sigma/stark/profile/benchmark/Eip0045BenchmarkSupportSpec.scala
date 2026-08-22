@@ -86,6 +86,38 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
     parseArgs(Array("--unknown")) shouldBe Left("unknown option at argument index 0")
   }
 
+  test("argument parsing accepts one diagnostic scenario selector") {
+    parseArgs(Array("--diagnostic-scenario", "valid-proof")) shouldBe Right(Config(
+      15,
+      100,
+      None,
+      None,
+      "unrecorded",
+      None,
+      None,
+      Some("valid-proof")))
+    parseArgs(Array("--diagnostic-scenario")) shouldBe
+      Left("missing value for --diagnostic-scenario")
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--diagnostic-scenario", "late-claim-mismatch")) shouldBe
+      Left("duplicate option --diagnostic-scenario")
+    parseArgs(Array("--diagnostic-scenario", "Valid-Proof")) shouldBe
+      Left("--diagnostic-scenario must be 1-64 characters using only lowercase ASCII letters, digits, or '-'")
+    Vector(" valid-proof", "valid-proof ", "", "valid\nproof", "a" * 65).foreach { value =>
+      parseArgs(Array("--diagnostic-scenario", value)) shouldBe
+        Left("--diagnostic-scenario must be 1-64 characters using only lowercase ASCII letters, digits, or '-'")
+    }
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--campaign-manifest", "campaign.json")) shouldBe
+      Left("--diagnostic-scenario cannot be combined with campaign options")
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--campaign-run-id", "run-01")) shouldBe
+      Left("--diagnostic-scenario cannot be combined with campaign options")
+  }
+
   test("unknown benchmark options never echo secret-shaped or path-shaped tokens") {
     val secretShaped = "--unknown=C:\\private\\credential-token-marker"
     val result = parseArgs(Array(secretShaped))
@@ -699,6 +731,155 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
     } finally {
       Files.deleteIfExists(output)
       Files.deleteIfExists(directory)
+    }
+  }
+
+  test("diagnostic selection isolates one scenario before every measured phase") {
+    val directory = Files.createTempDirectory("eip0045-single-scenario-")
+    try {
+      ExpectedScenarios.foreach { policy =>
+        val events = ArrayBuffer.empty[String]
+        final class Handle extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+          override val identity: MemoryPoolIdentity = MemoryPoolIdentity("test-heap", "HEAP")
+          override def isValid: Boolean = true
+          override def resetPeakUsage(): Unit = events += "reset"
+          override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+          override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+        }
+        val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+          override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+            Vector(new Handle)
+        }
+        val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+          override def beforeVerifierSetup(): Unit = events += "setup"
+          override def beforeValidationInvocation(): Unit = events += "validation"
+          override def beforeWarmupInvocation(): Unit = events += "warmup"
+          override def beforeTimedInvocation(): Unit = events += "sample"
+          override def beforeOutput(): Unit = events += "output"
+        }
+        val output = directory.resolve(policy.id + ".json")
+        try {
+          Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+            "--diagnostic-scenario", policy.id,
+            "--warmup-rounds", "1",
+            "--sample-rounds", "1",
+            "--implementation-revision", "commit:" + ("1" * 40),
+            "--cpu-model", "Test CPU",
+            "--output", output.toString), observer, source)
+
+          events.count(_ == "validation") shouldBe 1
+          events.count(_ == "warmup") shouldBe 1
+          events.count(_ == "sample") shouldBe 1
+          events.indexOf("setup") should be < events.indexOf("validation")
+          events.indexOf("warmup") should be < events.indexOf("reset")
+          events.indexOf("reset") should be < events.indexOf("sample")
+          events.indexOf("sample") should be < events.indexOf("output")
+
+          val json = new String(Files.readAllBytes(output), StandardCharsets.UTF_8)
+          json should include ("\"id\":\"" + policy.id + "\"")
+          ExpectedScenarios.filterNot(_.id == policy.id).foreach { excluded =>
+            json should not include ("\"id\":\"" + excluded.id + "\"")
+          }
+          json should include (
+            "Validation invokes the selected scenario before warmup")
+          json should not include (
+            "Validation invokes every scenario before warmup")
+          json should include (
+            "Diagnostic scenario selection excludes the other five fixed scenarios")
+        } finally {
+          Files.deleteIfExists(output)
+        }
+      }
+    } finally {
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  test("unknown diagnostic selection fails before management and verifier setup") {
+    var allocationMeterOpens = 0
+    var topologyReads = 0
+    var verifierSetups = 0
+    var outputAttempts = 0
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+        topologyReads += 1
+        throw new AssertionError("memory pools must not be read")
+      }
+    }
+    val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeThreadAllocationMeterOpen(): Unit = allocationMeterOpens += 1
+      override def beforeVerifierSetup(): Unit = verifierSetups += 1
+      override def beforeOutput(): Unit = outputAttempts += 1
+    }
+    val directory = Files.createTempDirectory("eip0045-unknown-scenario-")
+    val output = directory.resolve("must-not-exist.json")
+    try {
+      val error = intercept[IllegalArgumentException] {
+        Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+          "--diagnostic-scenario", "private-token-marker",
+          "--sample-rounds", "1",
+          "--output", output.toString), observer, source)
+      }
+      error.getMessage shouldBe "unknown diagnostic scenario"
+      error.getMessage should not include "private-token-marker"
+      allocationMeterOpens shouldBe 0
+      topologyReads shouldBe 0
+      verifierSetups shouldBe 0
+      outputAttempts shouldBe 0
+      Files.exists(output) shouldBe false
+    } finally {
+      Files.deleteIfExists(output)
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  test("mixed help and diagnostic selectors fail before management and evidence output") {
+    val invocations = Vector(
+      Array("--diagnostic-scenario", "Valid-Proof", "--help"),
+      Array(
+        "--diagnostic-scenario", "valid-proof",
+        "--diagnostic-scenario", "late-claim-mismatch",
+        "--help"),
+      Array("--diagnostic-scenario", "private-token-marker", "--help"),
+      Array(
+        "--diagnostic-scenario", "valid-proof",
+        "--campaign-manifest", "campaign.json",
+        "--help"))
+
+    invocations.zipWithIndex.foreach { case (args, index) =>
+      var allocationMeterOpens = 0
+      var topologyReads = 0
+      var verifierSetups = 0
+      var outputAttempts = 0
+      val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+        override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] = {
+          topologyReads += 1
+          throw new AssertionError("memory pools must not be read")
+        }
+      }
+      val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+        override def beforeThreadAllocationMeterOpen(): Unit = allocationMeterOpens += 1
+        override def beforeVerifierSetup(): Unit = verifierSetups += 1
+        override def beforeOutput(): Unit = outputAttempts += 1
+      }
+      val directory = Files.createTempDirectory("eip0045-mixed-help-")
+      val output = directory.resolve("must-not-exist-" + index + ".json")
+      try {
+        intercept[IllegalArgumentException] {
+          Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(
+            args ++ Array("--output", output.toString),
+            observer,
+            source)
+        }
+        allocationMeterOpens shouldBe 0
+        topologyReads shouldBe 0
+        verifierSetups shouldBe 0
+        outputAttempts shouldBe 0
+        Files.exists(output) shouldBe false
+      } finally {
+        Files.deleteIfExists(output)
+        Files.deleteIfExists(directory)
+      }
     }
   }
 

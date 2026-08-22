@@ -9,7 +9,7 @@ The benchmark loads the checked-in B1, B2, and B3 resources through the
 production profile-package loader and hard-binds the candidate profile ID. It
 also loads a checked-in po2-16 interoperability KAT from a separate source,
 derives its claim from the image ID and journal, and compares that result with
-the retained claim digest. It then measures six preconstructed scenarios:
+the retained claim digest. It defines six preconstructed scenarios:
 
 - a valid real RISC0 raw seal;
 - a wrong first transport-chunk length rejected before cryptographic work;
@@ -18,12 +18,12 @@ the retained claim digest. It then measures six preconstructed scenarios:
 - a claim mismatch reached after all proof queries;
 - the independently sourced real raw seal accepted as a normal po2-16 lift.
 
-Each scenario is validated before timing. Warmup and sampling use a deterministic
+Each selected scenario is validated before timing. Warmup and sampling use a deterministic
 rotating round-robin order so no path permanently occupies one position. One
 sample is one complete `Risc0RawSealVerifier.verify` call. Profile loading,
 fixture construction, claim derivation, validation probes, JSON serialization,
 and summary calculation are outside the timed samples. Validation invokes every
-scenario before warmup, so a zero-warmup smoke is not a cold-start measurement.
+selected scenario before warmup, so a zero-warmup smoke is not a cold-start measurement.
 Version 5 records the current benchmark thread's
 allocated-byte delta around each invocation and process-wide garbage-collector
 count/time deltas across the complete sampling phase. It also records a
@@ -75,6 +75,40 @@ from a rejected campaign run to diagnostic mode. Omitting both campaign options
 still runs a local diagnostic, and the output labels it as non-campaign evidence.
 Supplying only one option, or using `unrecorded` in campaign mode, fails before
 output.
+
+## Single-scenario diagnostics
+
+An unbound diagnostic can isolate one of the six fixed direct-verifier paths.
+For example, this command measures only the early transport rejection:
+
+```text
+sbt -batch "project coreJVM" "set Test / fork := true" "Test / runMain sigma.stark.profile.benchmark.Eip0045VerifierBenchmark --diagnostic-scenario early-transport-rejection --warmup-rounds 15 --sample-rounds 100 --implementation-revision REVISION_OR_TREE_DIGEST --cpu-model CPU_MODEL --output target/eip0045-early-transport-diagnostic.json"
+```
+
+The accepted IDs are `valid-proof`, `early-transport-rejection`,
+`early-canonical-cryptographic-rejection`, `late-cryptographic-mutation`,
+`late-claim-mismatch` and `valid-independent-po2-16`. The option may appear
+once and cannot be combined with `--campaign-manifest` or `--campaign-run-id`.
+An unknown ID fails before the runner opens its management counters or loads
+the profile fixture.
+
+The runner still authenticates the complete checked-in fixture set and builds
+the fixed scenario table. It then selects the named entry before validation,
+warmup and sampling. The JSON therefore contains one `ScenarioEvidence`; none
+of the other five paths enters those three phases. The pool reset occurs after
+the selected path's warmup.
+
+This mode keeps the V5 envelope so the raw allocation samples, GC deltas and
+per-pool snapshots remain digest-bound. Its `campaignBinding` is null and its
+limitations state that five scenarios were excluded. The campaign validator
+still requires all six scenarios in their fixed order, so this output cannot be
+accepted as campaign evidence.
+
+The pool readings describe the complete one-scenario sampling phase, including
+runner and JMX work inside the reset/read boundaries. They do not measure
+object liveness, retained heap, RSS, native memory or other-thread allocations,
+and they cannot assign a pool peak to one verifier invocation. Use a fresh JVM
+for each selected path when comparing these diagnostics.
 
 ## Evidence format and integrity
 
