@@ -274,6 +274,15 @@ package sigmastate.interpreter {
         AvailabilityPassed,
         DirectEvaluatorEntered) ++ CanonicalActiveRouteEvents
 
+    private val CanonicalMaterializedActivePrefix =
+      Vector(
+        StructuralPlanBuilt,
+        ContinuationTaken,
+        MaterializedPathSelected,
+        AvailabilityChecked,
+        AvailabilityPassed,
+        JitReductionEntered) ++ CanonicalActiveRouteEvents
+
     private val FullOperationCounts = Vector(217, 4050, 353, 1384, 12, 244, 32)
     private val PackageRoot = "/stark-kats/eip0045-profile-package/"
     private val DirectRoot = "/stark-kats/eip0045-direct/"
@@ -435,6 +444,13 @@ package sigmastate.interpreter {
           proof.iterator.map(ByteArrayConstant(_)).toIndexedSeq,
           SByteArray),
         1.toByte -> ByteArrayConstant(ReferencePayload)))
+
+    private def referenceCall: VerifyStark =
+      VerifyStark(
+        OptionGet(GetVar(0.toByte, SCollection(SByteArray))),
+        OptionGet(GetVar(1.toByte, SByteArray)),
+        ByteArrayConstant(Eip0045ReferenceContract.programId),
+        ByteArrayConstant(Eip0045ReferenceContract.profileId))
 
     private def chunks(values: Array[Byte]*):
         Value[SCollection[SCollection[SByte.type]]] =
@@ -681,6 +697,9 @@ package sigmastate.interpreter {
     private def materializedTree: ErgoTree =
       v4Tree(DeserializeContext(1, SBoolean).toSigmaProp)
 
+    private def materializedReferenceTree: ErgoTree =
+      v4Tree(DeserializeContext(2, SBoolean).toSigmaProp)
+
     private def materializedContext(
         tree: ErgoTree,
         value: Value[_ <: SType],
@@ -690,6 +709,15 @@ package sigmastate.interpreter {
         capability,
         ContextExtension(Map(
           1.toByte -> ByteArrayConstant(ValueSerializer.serialize(value)))))
+
+    private def materializedReferenceContext(
+        tree: ErgoTree,
+        proof: Array[Array[Byte]]): ErgoLikeContext =
+      contextFor(
+        tree,
+        activeSnapshot(stockRuntime),
+        referenceExtension(proof).add(
+          2.toByte -> ByteArrayConstant(ValueSerializer.serialize(referenceCall))))
 
     test("unavailable non-empty plans stop at the availability boundary") {
       val directInterpreter = new CensusInterpreter
@@ -937,6 +965,60 @@ package sigmastate.interpreter {
       CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
     }
 
+    test("the materialized continuation joins raw entry to the complete verifier-operation census") {
+      val tree = materializedReferenceTree
+      val proof = canonicalChunks(rawSeal)
+      val context = materializedReferenceContext(tree, proof)
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      preflight.plan.occurrences should have size 1
+      interpreter.v4DeserializeCalls shouldBe 1
+      observer.events shouldBe Vector(StructuralPlanBuilt)
+
+      val operationCounts = Array.fill(FullOperationCounts.length)(0)
+      var operationCallbacks = 0
+      var activeEvaluator: CErgoTreeEvaluator = null
+      val profiler = Eip0045FullRouteOperationProfiler(
+        event => {
+          if (event == ProfileIdEvaluated)
+            activeEvaluator = CErgoTreeEvaluator.getCurrentEvaluator
+          observer.recordRouteEvent(event)
+        },
+        operationId => {
+          operationId should (be >= 1 and be <= operationCounts.length)
+          if (operationCallbacks == 0)
+            observer.recordRouteEvent(FirstVerifierOperation)
+          operationCounts(operationId - 1) += 1
+          operationCallbacks += 1
+        })
+      val observed = observedRouteContinuation(interpreter)(
+        tree,
+        context,
+        preflight,
+        observer,
+        profiler)
+      val ordinary = ordinaryContinuation(new CensusInterpreter)(tree, context)
+
+      observed.value shouldBe ordinary.value
+      observed.cost shouldBe ordinary.cost
+      observed.value shouldBe TrivialProp.FalseProp
+      CanonicalActiveRouteEvents.length shouldBe 65
+      CanonicalMaterializedActivePrefix.length shouldBe 71
+      operationCounts.toVector shouldBe FullOperationCounts
+      operationCallbacks shouldBe FullOperationCounts.sum
+      FullOperationCounts.sum shouldBe 6292
+      observer.events shouldBe
+        (CanonicalMaterializedActivePrefix :+ FirstVerifierOperation)
+      classOf[Risc0RawSealVerifier.Probe].isAssignableFrom(profiler.getClass) shouldBe false
+      activeEvaluator should not be null
+      activeEvaluator.profiler should be theSameInstanceAs profiler
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+    }
+
     test("the first full-route operation exception preserves identity and evaluator scope") {
       val tree = Eip0045ReferenceContract.buildTree()
       val context = contextFor(
@@ -965,6 +1047,37 @@ package sigmastate.interpreter {
 
       failure should be theSameInstanceAs sentinel
       observer.events shouldBe CanonicalDirectActivePrefix
+      CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
+    }
+
+    test("the first materialized full-route operation exception preserves identity and evaluator scope") {
+      val tree = materializedReferenceTree
+      val context = materializedReferenceContext(tree, canonicalChunks(rawSeal))
+      val interpreter = new CensusInterpreter
+      val observer = new JoinedObserver
+      val preflight = successful(interpreter)(observedPreflight(interpreter)(
+        tree,
+        context,
+        observer))
+      preflight.plan.occurrences should have size 1
+      interpreter.v4DeserializeCalls shouldBe 1
+      observer.events shouldBe Vector(StructuralPlanBuilt)
+      val sentinel = new ObserverSentinel
+      val profiler = Eip0045FullRouteOperationProfiler(
+        observer.recordRouteEvent,
+        _ => throw sentinel)
+
+      val failure = intercept[ObserverSentinel] {
+        observedRouteContinuation(interpreter)(
+          tree,
+          context,
+          preflight,
+          observer,
+          profiler)
+      }
+
+      failure should be theSameInstanceAs sentinel
+      observer.events shouldBe CanonicalMaterializedActivePrefix
       CErgoTreeEvaluator.getCurrentEvaluator shouldBe null
     }
 

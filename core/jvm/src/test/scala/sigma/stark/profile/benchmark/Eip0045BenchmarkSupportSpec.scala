@@ -118,6 +118,60 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
       Left("--diagnostic-scenario cannot be combined with campaign options")
   }
 
+  test("operation-only measurement is explicit and diagnostic-only") {
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--verifier-route", "operation-only")) shouldBe Right(Config(
+      15,
+      100,
+      None,
+      None,
+      "unrecorded",
+      None,
+      None,
+      Some("valid-proof"),
+      OperationOnlyVerifierRoute))
+    parseArgs(Array("--verifier-route")) shouldBe
+      Left("missing value for --verifier-route")
+    parseArgs(Array("--verifier-route", "capturing")) shouldBe
+      Left("--verifier-route must be no-probe or operation-only")
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--verifier-route", "operation-only",
+      "--verifier-route", "no-probe")) shouldBe
+      Left("duplicate option --verifier-route")
+    parseArgs(Array("--verifier-route", "operation-only")) shouldBe
+      Left("--verifier-route operation-only requires --diagnostic-scenario")
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--verifier-route", "operation-only",
+      "--paired-allocation")) shouldBe Right(Config(
+      15,
+      100,
+      None,
+      None,
+      "unrecorded",
+      None,
+      None,
+      Some("valid-proof"),
+      OperationOnlyVerifierRoute,
+      pairedAllocation = true))
+    parseArgs(Array("--paired-allocation")) shouldBe
+      Left("--paired-allocation requires --diagnostic-scenario")
+    parseArgs(Array(
+      "--diagnostic-scenario", "valid-proof",
+      "--paired-allocation",
+      "--paired-allocation")) shouldBe
+      Left("duplicate option --paired-allocation")
+  }
+
+  test("paired-allocation help names the supported verifier routes") {
+    Usage should include ("--verifier-route ROUTE")
+    Usage should include ("no-probe (default) or operation-only")
+    Usage should include (
+      "--paired-allocation Run the route-exact preflight and allocation-count gate")
+  }
+
   test("unknown benchmark options never echo secret-shaped or path-shaped tokens") {
     val secretShaped = "--unknown=C:\\private\\credential-token-marker"
     val result = parseArgs(Array(secretShaped))
@@ -791,6 +845,94 @@ class Eip0045BenchmarkSupportSpec extends AnyFunSuite with Matchers {
         }
       }
     } finally {
+      Files.deleteIfExists(directory)
+    }
+  }
+
+  test("paired diagnostics bind and execute each exact verifier route") {
+    val events = ArrayBuffer.empty[String]
+    final class Handle extends Eip0045VerifierBenchmark.MemoryPoolHandle {
+      override val identity: MemoryPoolIdentity = MemoryPoolIdentity("test-heap", "HEAP")
+      override def isValid: Boolean = true
+      override def resetPeakUsage(): Unit = events += "reset"
+      override def usage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+      override def peakUsage(): MemoryUsageEvidence = MemoryUsageEvidence(10L, 20L, -1L)
+    }
+    val source = new Eip0045VerifierBenchmark.MemoryPoolSource {
+      override def handles(): Vector[Eip0045VerifierBenchmark.MemoryPoolHandle] =
+        Vector(new Handle)
+    }
+    val observer = new Eip0045VerifierBenchmark.ExecutionObserver {
+      override def beforeVerifierSetup(): Unit = events += "setup"
+      override def beforeValidationInvocation(): Unit = events += "validation"
+      override def beforeWarmupInvocation(): Unit = events += "warmup"
+      override def beforeTimedInvocation(): Unit = events += "sample"
+      override def beforeOutput(): Unit = events += "output"
+    }
+    val directory = Files.createTempDirectory("eip0045-operation-only-")
+    val output = directory.resolve("evidence.json")
+    val noProbeOutput = directory.resolve("no-probe-evidence.json")
+    try {
+      Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+        "--diagnostic-scenario", "valid-proof",
+        "--verifier-route", "operation-only",
+        "--paired-allocation",
+        "--warmup-rounds", "1",
+        "--sample-rounds", "1",
+        "--implementation-revision", "commit:" + ("2" * 40),
+        "--cpu-model", "Test CPU",
+        "--output", output.toString), observer, source)
+
+      events.count(_ == "validation") shouldBe 1
+      events.count(_ == "warmup") shouldBe 1
+      events.count(_ == "sample") shouldBe 1
+      events.indexOf("setup") should be < events.indexOf("validation")
+      events.indexOf("validation") should be < events.indexOf("warmup")
+      events.indexOf("warmup") should be < events.indexOf("reset")
+      events.indexOf("reset") should be < events.indexOf("sample")
+      events.indexOf("sample") should be < events.indexOf("output")
+
+      val json = new String(Files.readAllBytes(output), StandardCharsets.UTF_8)
+      json should include (
+        "\"verifierEntryPoint\":\"sigma.stark.profile.Risc0RawSealVerifier.verifyObservedOperations\"")
+      json should include (
+        "\"timedScope\":\"Risc0RawSealVerifier.verifyObservedOperations; fixture and profile loading excluded\"")
+      json should include (
+        "The operation-only route uses one preallocated observer with seven primitive counters")
+      json should include (
+        "The operation-only route is diagnostic-only")
+      json should include (
+        "\"validationQueryCheckpoints\":0")
+      json should include (
+        "\"lastVerifierCheckpoint\":\"none\"")
+      json should include (
+        "This paired-allocation process validates only the selected verifier route before warmup")
+
+      events.clear()
+      Eip0045VerifierBenchmark.runWithMemoryPoolSourceForTest(Array(
+        "--diagnostic-scenario", "valid-proof",
+        "--verifier-route", "no-probe",
+        "--paired-allocation",
+        "--warmup-rounds", "1",
+        "--sample-rounds", "1",
+        "--implementation-revision", "commit:" + ("3" * 40),
+        "--cpu-model", "Test CPU",
+        "--output", noProbeOutput.toString), observer, source)
+
+      events.count(_ == "validation") shouldBe 1
+      events.count(_ == "warmup") shouldBe 1
+      events.count(_ == "sample") shouldBe 1
+      val noProbeJson =
+        new String(Files.readAllBytes(noProbeOutput), StandardCharsets.UTF_8)
+      noProbeJson should include (
+        "\"verifierEntryPoint\":\"sigma.stark.profile.Risc0RawSealVerifier.verify\"")
+      noProbeJson should include (
+        "\"timedScope\":\"Risc0RawSealVerifier.verify; fixture and profile loading excluded\"")
+      noProbeJson should not include ("verifyObservedOperations")
+      noProbeJson should include ("\"validationQueryCheckpoints\":0")
+    } finally {
+      Files.deleteIfExists(output)
+      Files.deleteIfExists(noProbeOutput)
       Files.deleteIfExists(directory)
     }
   }

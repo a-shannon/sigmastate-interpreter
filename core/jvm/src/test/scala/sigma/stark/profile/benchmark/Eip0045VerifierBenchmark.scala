@@ -91,6 +91,62 @@ object Eip0045VerifierBenchmark {
   private val EarlyCanonicalOperationCounts =
     OperationCounts(31, 0, 1, 3, 4, 0, 4)
 
+  private final class CountingOperationObserver extends VerifierOperationObserver {
+    import VerifierOperationObserver._
+
+    private var topPairHashes = 0
+    private var queryPairHashes = 0
+    private var contentHashCalls = 0
+    private var contentHashPermutations = 0
+    private var rngCommits = 0
+    private var rngElementDraws = 0
+    private var rngPermutations = 0
+
+    override def onOperation(operationId: Int): Unit = operationId match {
+      case MerkleTopPairHash      => topPairHashes += 1
+      case MerkleQueryPairHash    => queryPairHashes += 1
+      case ContentHashCall        => contentHashCalls += 1
+      case ContentHashPermutation => contentHashPermutations += 1
+      case RngCommit              => rngCommits += 1
+      case RngElementDraw         => rngElementDraws += 1
+      case RngPermutation         => rngPermutations += 1
+      case other => throw new IllegalStateException("unknown verifier operation id: " + other)
+    }
+
+    def operationCounts: OperationCounts = OperationCounts(
+      topPairHashes,
+      queryPairHashes,
+      contentHashCalls,
+      contentHashPermutations,
+      rngCommits,
+      rngElementDraws,
+      rngPermutations)
+
+    def reset(): Unit = {
+      topPairHashes = 0
+      queryPairHashes = 0
+      contentHashCalls = 0
+      contentHashPermutations = 0
+      rngCommits = 0
+      rngElementDraws = 0
+      rngPermutations = 0
+    }
+  }
+
+  private[benchmark] final class ObservedOperationRun(
+      verifier: Risc0RawSealVerifier,
+      proofChunks: Array[Array[Byte]],
+      expectedClaim: Array[Byte])
+      extends (() => Either[Failure, Verified]) {
+    private val observer = new CountingOperationObserver
+
+    override def apply(): Either[Failure, Verified] =
+      verifier.verifyObservedOperations(proofChunks, expectedClaim, observer)
+
+    def operationCounts: OperationCounts = observer.operationCounts
+    def resetOperationCounts(): Unit = observer.reset()
+  }
+
   private final class ValidationProbe extends Probe with VerifierOperationObserver {
     import VerifierOperationObserver._
 
@@ -140,6 +196,7 @@ object Eip0045VerifierBenchmark {
       expectedLastCheckpoint: String,
       expectedOperationCounts: OperationCounts,
       run: () => Either[Failure, Verified],
+      runObservedOperations: ObservedOperationRun,
       runWithProbe: Probe => Either[Failure, Verified])
 
   private final case class ProofFixture(
@@ -281,15 +338,24 @@ object Eip0045VerifierBenchmark {
     val startedAt = Instant.now().toString
     val runStarted = System.nanoTime()
 
-    val validation = scenarios.map(scenario => validateScenario(scenario, observer))
-    warmUp(scenarios, config.warmupRounds, observer)
+    val validation = scenarios.map { scenario =>
+      if (config.pairedAllocation)
+        validateRouteExactScenario(scenario, config.verifierRoute, observer)
+      else validateScenario(scenario, observer)
+    }
+    warmUp(scenarios, config.warmupRounds, config.verifierRoute, observer)
     val measurements = measure(
       scenarios,
       config.sampleRounds,
+      config.verifierRoute,
       allocationMeter,
       memoryPools,
       memoryPoolSource,
       observer)
+    validateMeasuredRoute(
+      scenarios,
+      config.verifierRoute,
+      Math.addExact(config.warmupRounds, config.sampleRounds))
 
     val duration = System.nanoTime() - runStarted
     val scenarioEvidence = scenarios.indices.map { i =>
@@ -328,12 +394,33 @@ object Eip0045VerifierBenchmark {
       } :+ "Diagnostic scenario selection excludes the other five fixed scenarios; this run is not complete campaign evidence."
       case None => baseLimitations
     }
+    val verifierEntryPoint = config.verifierRoute match {
+      case NoProbeVerifierRoute =>
+        "sigma.stark.profile.Risc0RawSealVerifier.verify"
+      case OperationOnlyVerifierRoute =>
+        "sigma.stark.profile.Risc0RawSealVerifier.verifyObservedOperations"
+      case _ => throw new IllegalStateException("unsupported verifier route")
+    }
+    val routeLimitations = config.verifierRoute match {
+      case NoProbeVerifierRoute => Vector.empty
+      case OperationOnlyVerifierRoute => Vector(
+        "The operation-only route uses one preallocated observer with seven primitive counters; callback dispatch and counter increments are included, while observer construction is excluded.",
+        "Successful output requires exact post-sampling operation totals for every warmup and measured invocation.",
+        "The operation-only route is diagnostic-only and is not acceptable campaign evidence.")
+      case _ => throw new IllegalStateException("unsupported verifier route")
+    }
+    val pairedLimitations =
+      if (config.pairedAllocation) Vector(
+        "This paired-allocation process validates only the selected verifier route before warmup; capturing checkpoint validation must be established in a separate process.",
+        "The route-exact preflight runs once before warmup, so zero warmup rounds are not a cold-start measurement.",
+        "Current-thread allocation counters are approximate JVM observations, not exact object counts.")
+      else Vector.empty
     val payload = EvidencePayload(
       startedAtUtc = startedAt,
       benchmarkDurationNs = duration,
       profileId = ExpectedProfileId,
       implementationRevision = config.implementationRevision,
-      verifierEntryPoint = "sigma.stark.profile.Risc0RawSealVerifier.verify",
+      verifierEntryPoint = verifierEntryPoint,
       resources = fixture.resources,
       warmupRounds = config.warmupRounds,
       sampleRounds = config.sampleRounds,
@@ -342,7 +429,7 @@ object Eip0045VerifierBenchmark {
       scenarios = scenarioEvidence,
       garbageCollectorDeltas = measurements.garbageCollectorDeltas,
       memoryPoolPhaseEnvelopes = measurements.memoryPoolPhaseEnvelopes,
-      limitations = scenarioScopedLimitations ++
+      limitations = scenarioScopedLimitations ++ routeLimitations ++ pairedLimitations ++
         (if (config.implementationRevision == "unrecorded")
           Vector("implementationRevision is unrecorded, so this run is not acceptable campaign evidence.")
         else Vector.empty))
@@ -585,6 +672,10 @@ object Eip0045VerifierBenchmark {
         "query",
         FullOperationCounts,
         () => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
+          validChunks,
+          fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(validChunks, fixture.primary.expectedClaim, probe)),
       Scenario(
         "early-transport-rejection",
@@ -594,6 +685,10 @@ object Eip0045VerifierBenchmark {
         "none",
         NoOperationCounts,
         () => fixture.verifier.verify(earlyRejectedChunks, fixture.primary.expectedClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
+          earlyRejectedChunks,
+          fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           earlyRejectedChunks,
           fixture.primary.expectedClaim,
@@ -608,6 +703,10 @@ object Eip0045VerifierBenchmark {
         () => fixture.verifier.verify(
           earlyCanonicalMutationChunks,
           fixture.primary.expectedClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
+          earlyCanonicalMutationChunks,
+          fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           earlyCanonicalMutationChunks,
           fixture.primary.expectedClaim,
@@ -620,6 +719,10 @@ object Eip0045VerifierBenchmark {
         "query",
         FullOperationCounts,
         () => fixture.verifier.verify(lateMutationChunks, fixture.primary.expectedClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
+          lateMutationChunks,
+          fixture.primary.expectedClaim),
         probe => fixture.verifier.verify(
           lateMutationChunks,
           fixture.primary.expectedClaim,
@@ -632,6 +735,10 @@ object Eip0045VerifierBenchmark {
         "query",
         FullOperationCounts,
         () => fixture.verifier.verify(validChunks, wrongClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
+          validChunks,
+          wrongClaim),
         probe => fixture.verifier.verify(validChunks, wrongClaim, probe)),
       Scenario(
         "valid-independent-po2-16",
@@ -641,6 +748,10 @@ object Eip0045VerifierBenchmark {
         "query",
         FullOperationCounts,
         () => fixture.verifier.verify(
+          independentValidChunks,
+          fixture.independent.expectedClaim),
+        new ObservedOperationRun(
+          fixture.verifier,
           independentValidChunks,
           fixture.independent.expectedClaim),
         probe => fixture.verifier.verify(
@@ -695,6 +806,71 @@ object Eip0045VerifierBenchmark {
     ValidationResult(probe.queries, boundary, probe.lastCheckpoint)
   }
 
+  private def validateRouteExactScenario(
+      scenario: Scenario,
+      verifierRoute: String,
+      observer: ExecutionObserver): ValidationResult = {
+    observer.beforeValidationInvocation()
+    val outcome = runScenario(scenario, verifierRoute)
+    checkOutcome(scenario, outcome)
+    val boundary = validationBoundary(outcome)
+    if (boundary != scenario.expectedValidationBoundary) {
+      throw new IllegalStateException(
+        scenario.id + " reached validation boundary " + boundary +
+          "; expected " + scenario.expectedValidationBoundary)
+    }
+    val observed = scenario.runObservedOperations.operationCounts
+    val expected = verifierRoute match {
+      case NoProbeVerifierRoute => NoOperationCounts
+      case OperationOnlyVerifierRoute => scenario.expectedOperationCounts
+      case _ => throw new IllegalStateException("unsupported verifier route")
+    }
+    if (observed != expected) {
+      throw new IllegalStateException(
+        scenario.id + " route-exact preflight observed operation counts " + observed +
+          "; expected " + expected)
+    }
+    scenario.runObservedOperations.resetOperationCounts()
+    ValidationResult(0, boundary, "none")
+  }
+
+  private def validateMeasuredRoute(
+      scenarios: Vector[Scenario],
+      verifierRoute: String,
+      invocationCount: Int): Unit = {
+    scenarios.foreach { scenario =>
+      val expected = verifierRoute match {
+        case NoProbeVerifierRoute => NoOperationCounts
+        case OperationOnlyVerifierRoute =>
+          scaleOperationCounts(scenario.expectedOperationCounts, invocationCount)
+        case _ => throw new IllegalStateException("unsupported verifier route")
+      }
+      val observed = scenario.runObservedOperations.operationCounts
+      if (observed != expected) {
+        throw new IllegalStateException(
+          scenario.id + " measured route observed operation counts " + observed +
+            "; expected " + expected)
+      }
+    }
+  }
+
+  private[benchmark] def validateMeasuredRouteForTest(
+      scenarios: Vector[Scenario],
+      verifierRoute: String,
+      invocationCount: Int): Unit =
+    validateMeasuredRoute(scenarios, verifierRoute, invocationCount)
+
+  private def scaleOperationCounts(
+      counts: OperationCounts,
+      factor: Int): OperationCounts = OperationCounts(
+    Math.multiplyExact(counts.topPairHashes, factor),
+    Math.multiplyExact(counts.queryPairHashes, factor),
+    Math.multiplyExact(counts.contentHashCalls, factor),
+    Math.multiplyExact(counts.contentHashPermutations, factor),
+    Math.multiplyExact(counts.rngCommits, factor),
+    Math.multiplyExact(counts.rngElementDraws, factor),
+    Math.multiplyExact(counts.rngPermutations, factor))
+
   private def validationBoundary(outcome: Either[Failure, Verified]): String = outcome match {
     case Right(_) => "verification-complete"
     case Left(TransportRejected(_: RawSealV1Decoder.WrongChunkLength)) =>
@@ -710,12 +886,13 @@ object Eip0045VerifierBenchmark {
   private def warmUp(
       scenarios: Vector[Scenario],
       rounds: Int,
+      verifierRoute: String,
       observer: ExecutionObserver): Unit = {
     var round = 0
     while (round < rounds) {
       runRotated(scenarios, round) { scenario =>
         observer.beforeWarmupInvocation()
-        checkOutcome(scenario, scenario.run())
+        checkOutcome(scenario, runScenario(scenario, verifierRoute))
       }
       round += 1
     }
@@ -724,6 +901,7 @@ object Eip0045VerifierBenchmark {
   private def measure(
       scenarios: Vector[Scenario],
       rounds: Int,
+      verifierRoute: String,
       allocationMeter: ThreadAllocationMeter,
       memoryPools: MemoryPoolTopology,
       memoryPoolSource: MemoryPoolSource,
@@ -738,7 +916,7 @@ object Eip0045VerifierBenchmark {
           observer.beforeTimedInvocation()
           val allocatedBefore = allocationMeter.read()
           val started = System.nanoTime()
-          val outcome = scenario.run()
+          val outcome = runScenario(scenario, verifierRoute)
           val elapsed = System.nanoTime() - started
           val allocatedAfter = allocationMeter.read()
           checkOutcome(scenario, outcome)
@@ -760,6 +938,14 @@ object Eip0045VerifierBenchmark {
       }
     }
     Measurements(timingSamples, allocationSamples, measured._1, measured._2)
+  }
+
+  private def runScenario(
+      scenario: Scenario,
+      verifierRoute: String): Either[Failure, Verified] = verifierRoute match {
+    case NoProbeVerifierRoute => scenario.run()
+    case OperationOnlyVerifierRoute => scenario.runObservedOperations()
+    case _ => throw new IllegalStateException("unsupported verifier route")
   }
 
   private[benchmark] def openMemoryPoolTopology(

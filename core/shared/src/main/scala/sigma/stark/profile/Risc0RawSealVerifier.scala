@@ -170,6 +170,7 @@ final class Risc0RawSealVerifier private[profile] (
       probe: Probe): Either[Failure, StarkResult] = {
     val p = parameterSnapshot
     val taps = p.taps
+    val captureCheckpoints = shouldCaptureCheckpoints(probe)
     val iop = new ReadIop(seal)
 
     iop.commit(proofSystemDigest, probe.operationSinkOrNull)
@@ -193,8 +194,8 @@ final class Risc0RawSealVerifier private[profile] (
     // during construction. No proof-controlled value reaches a shift.
     val totCycles = p.totCycles
     val domain = p.domain
-    checkpoint(probe, "outer_po2", Array(outerPo2))
-    checkpoint(probe, "out", out)
+    if (captureCheckpoints) checkpoint(probe, "outer_po2", Array(outerPo2))
+    if (captureCheckpoints) checkpoint(probe, "out", out)
 
     // Merkle group ids are 0=accum, 1=code, 2=data. Transcript creation
     // order is CODE, DATA, ACCUM; query-opening order is ACCUM, CODE, DATA.
@@ -207,16 +208,18 @@ final class Risc0RawSealVerifier private[profile] (
       case Left(detail) => return Left(MalformedProof("code-group", detail))
       case Right(tree)  => tree
     }
-    checkpoint(probe, "group_root_code", codeMerkle.rootRawOwned)
+    if (captureCheckpoints)
+      checkpoint(probe, "group_root_code", codeMerkle.rootRawOwned)
 
     val terminalControl = matchControlId(codeMerkle.rootRawOwned) match {
       case Left(failure) => return Left(failure)
       case Right(value)  => value
     }
-    checkpoint(
-      probe,
-      "derived_terminal_control",
-      Array(terminalControl.kind, terminalControl.parameter))
+    if (captureCheckpoints)
+      checkpoint(
+        probe,
+        "derived_terminal_control",
+        Array(terminalControl.kind, terminalControl.parameter))
 
     val dataMerkle = MerkleVerifier.create(
       iop,
@@ -227,7 +230,8 @@ final class Risc0RawSealVerifier private[profile] (
       case Left(detail) => return Left(MalformedProof("data-group", detail))
       case Right(tree)  => tree
     }
-    checkpoint(probe, "group_root_data", dataMerkle.rootRawOwned)
+    if (captureCheckpoints)
+      checkpoint(probe, "group_root_data", dataMerkle.rootRawOwned)
 
     val mixGlobals = new Array[Int](p.mixSize)
     var i = 0
@@ -235,7 +239,7 @@ final class Risc0RawSealVerifier private[profile] (
       mixGlobals(i) = iop.randomElem(probe.operationSinkOrNull)
       i += 1
     }
-    checkpoint(probe, "mix", mixGlobals)
+    if (captureCheckpoints) checkpoint(probe, "mix", mixGlobals)
 
     val accumMerkle = MerkleVerifier.create(
       iop,
@@ -246,10 +250,11 @@ final class Risc0RawSealVerifier private[profile] (
       case Left(detail) => return Left(MalformedProof("accum-group", detail))
       case Right(tree)  => tree
     }
-    checkpoint(probe, "group_root_accum", accumMerkle.rootRawOwned)
+    if (captureCheckpoints)
+      checkpoint(probe, "group_root_accum", accumMerkle.rootRawOwned)
 
     val polyMix = iop.randomExtElem(probe.operationSinkOrNull)
-    checkpoint(probe, "poly_mix", extWords(polyMix))
+    if (captureCheckpoints) checkpoint(probe, "poly_mix", extWords(polyMix))
 
     val checkMerkle = MerkleVerifier.create(
       iop,
@@ -262,7 +267,7 @@ final class Risc0RawSealVerifier private[profile] (
     }
 
     val z = iop.randomExtElem(probe.operationSinkOrNull)
-    checkpoint(probe, "z", extWords(z))
+    if (captureCheckpoints) checkpoint(probe, "z", extWords(z))
     val backOne = FriVerifier.RouRev(outerPo2)
 
     val numTaps = taps.tapSize
@@ -273,7 +278,7 @@ final class Risc0RawSealVerifier private[profile] (
     iop.commit(
       Poseidon2.unpaddedHash(coeffWords, probe.operationSinkOrNull).map(BabyBear.toRaw),
       probe.operationSinkOrNull)
-    checkpoint(probe, "coeff_u", coeffWords)
+    if (captureCheckpoints) checkpoint(probe, "coeff_u", coeffWords)
 
     val coeffU = new Array[Ext4](numTaps + p.checkSize)
     i = 0
@@ -302,7 +307,7 @@ final class Risc0RawSealVerifier private[profile] (
       curPos += register.backs.length
       registerIndex += 1
     }
-    checkpoint(probe, "eval_u", extArrayWords(evalU))
+    if (captureCheckpoints) checkpoint(probe, "eval_u", extArrayWords(evalU))
 
     val result = PolyExtInterpreter.runValidated(
       p.program.ops,
@@ -312,7 +317,7 @@ final class Risc0RawSealVerifier private[profile] (
       polyMix,
       evalU,
       Array(out, mixGlobals)).tot
-    checkpoint(probe, "result", extWords(result))
+    if (captureCheckpoints) checkpoint(probe, "result", extWords(result))
 
     // Four check-polynomial planes, with risc0-zkp's [0,2,1,3] remap.
     var check = Ext4.Zero
@@ -329,12 +334,13 @@ final class Risc0RawSealVerifier private[profile] (
       i += 1
     }
     check = check * (scale(z, 3).pow(BigInt(totCycles)) - Ext4.One)
-    checkpoint(probe, "check_value", extWords(check))
+    if (captureCheckpoints) checkpoint(probe, "check_value", extWords(check))
     if (check != result) return Left(ConstraintCheckFailed)
 
     // DEEP-ALI batching.
     val friMix = iop.randomExtElem(probe.operationSinkOrNull)
-    checkpoint(probe, "fri_batch_mix", extWords(friMix))
+    if (captureCheckpoints)
+      checkpoint(probe, "fri_batch_mix", extWords(friMix))
     val comboU = Array.fill(taps.totComboBacks + 1)(Ext4.Zero)
     val tapMixPows = new Array[Ext4](taps.regs.length)
     val checkMixPows = new Array[Ext4](p.checkSize)
@@ -362,12 +368,14 @@ final class Risc0RawSealVerifier private[profile] (
       curMix = curMix * friMix
       i += 1
     }
-    checkpoint(probe, "combo_u", extArrayWords(comboU))
+    if (captureCheckpoints)
+      checkpoint(probe, "combo_u", extArrayWords(comboU))
 
     val gen = FriVerifier.RouFwd(FriVerifier.log2Ceil(domain))
     var queryNumber = 0
     val inner: Int => Either[String, Ext4] = { index =>
-      checkpoint(probe, "query", Array(queryNumber, index))
+      if (captureCheckpoints)
+        checkpoint(probe, "query", Array(queryNumber, index))
       queryNumber += 1
       accumMerkle.verify(iop, index, probe.operationSinkOrNull) match {
         case Left(detail) => Left("accum row: " + detail)
@@ -643,7 +651,7 @@ object Risc0RawSealVerifier {
   }
   object NoProbe extends Probe
 
-  private final class OperationOnlyProbe(observer: VerifierOperationObserver)
+  private[profile] final class OperationOnlyProbe(observer: VerifierOperationObserver)
       extends Probe {
     override final def onCheckpoint(label: String, values: Array[Int]): Unit = ()
     override private[stark] final def operationSinkOrNull: VerifierOperationObserver =
@@ -1107,11 +1115,18 @@ object Risc0RawSealVerifier {
     words
   }
 
-  /** Test probes never receive a verifier-owned mutable array. The production
-    * no-op probe also avoids the clone entirely.
+  /** Checkpoint-disabled probes do not evaluate diagnostic payloads. Capturing
+    * probes evaluate each payload once and receive a defensive clone.
     */
-  private def checkpoint(probe: Probe, label: String, values: Array[Int]): Unit =
-    if (!(probe eq NoProbe)) probe.onCheckpoint(label, values.clone())
+  private def shouldCaptureCheckpoints(probe: Probe): Boolean =
+    (probe ne NoProbe) && !probe.isInstanceOf[OperationOnlyProbe]
+
+  private[profile] def checkpoint(
+      probe: Probe,
+      label: String,
+      values: => Array[Int]): Unit =
+    if (shouldCaptureCheckpoints(probe))
+      probe.onCheckpoint(label, values.clone())
 
   private def unsigned(value: Int): Long = value & 0xffffffffL
 

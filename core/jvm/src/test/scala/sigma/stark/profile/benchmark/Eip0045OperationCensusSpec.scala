@@ -10,6 +10,7 @@ import org.scalatest.matchers.should.Matchers
 import sigma.stark.{MerkleVerifier, Poseidon2, Poseidon2Rng, ReadIop, VerifierOperationObserver}
 import sigma.stark.profile.Risc0RawSealVerifier
 import sigma.stark.profile.Risc0RawSealVerifier.Probe
+import sigma.stark.profile.benchmark.Eip0045BenchmarkSupport.OperationOnlyVerifierRoute
 
 private object Eip0045OperationCensusSpec {
   final case class Counts(
@@ -90,6 +91,54 @@ class Eip0045OperationCensusSpec extends AnyFunSuite with Matchers {
       val probe = new CountingProbe
       current.runWithProbe(probe) shouldBe productionResult
     }
+  }
+
+  test("operation-only benchmark closures preserve outcomes and exact counts") {
+    scenarios.foreach { current =>
+      current.runObservedOperations.resetOperationCounts()
+      try {
+        current.runObservedOperations() shouldBe current.run()
+        current.runObservedOperations.operationCounts shouldBe
+          current.expectedOperationCounts
+      } finally current.runObservedOperations.resetOperationCounts()
+    }
+  }
+
+  test("paired allocation gate rejects every single-counter mismatch") {
+    val current = scenario("valid-proof")
+    current.runObservedOperations.resetOperationCounts()
+    try {
+      current.runObservedOperations() shouldBe current.run()
+      val expected = current.expectedOperationCounts
+      val mutants = Vector(
+        "topPairHashes" -> expected.copy(
+          topPairHashes = expected.topPairHashes + 1),
+        "queryPairHashes" -> expected.copy(
+          queryPairHashes = expected.queryPairHashes + 1),
+        "contentHashCalls" -> expected.copy(
+          contentHashCalls = expected.contentHashCalls + 1),
+        "contentHashPermutations" -> expected.copy(
+          contentHashPermutations = expected.contentHashPermutations + 1),
+        "rngCommits" -> expected.copy(
+          rngCommits = expected.rngCommits + 1),
+        "rngElementDraws" -> expected.copy(
+          rngElementDraws = expected.rngElementDraws + 1),
+        "rngPermutations" -> expected.copy(
+          rngPermutations = expected.rngPermutations + 1))
+
+      mutants.foreach { case (field, operationCounts) =>
+        val mismatched = current.copy(expectedOperationCounts = operationCounts)
+        val error = intercept[IllegalStateException] {
+          Eip0045VerifierBenchmark.validateMeasuredRouteForTest(
+            Vector(mismatched),
+            OperationOnlyVerifierRoute,
+            invocationCount = 1)
+        }
+        withClue(field + ": ") {
+          error.getMessage should include("measured route observed operation counts")
+        }
+      }
+    } finally current.runObservedOperations.resetOperationCounts()
   }
 
   test("dynamic census observes the complete stock-profile primitive vector") {

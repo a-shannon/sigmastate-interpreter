@@ -23,6 +23,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
   final val Canonicalization: String = "utf8-fixed-field-order-no-whitespace-v5"
   final val DefaultWarmupRounds: Int = 15
   final val DefaultSampleRounds: Int = 100
+  final val NoProbeVerifierRoute: String = "no-probe"
+  final val OperationOnlyVerifierRoute: String = "operation-only"
   final val MaxWarmupRounds: Int = 10000
   final val MaxSampleRounds: Int = 10000
   final val MaxCampaignManifestBytes: Int = 1024 * 1024
@@ -41,7 +43,9 @@ private[benchmark] object Eip0045BenchmarkSupport {
       implementationRevision: String,
       campaignManifestPath: Option[String],
       campaignRunId: Option[String],
-      diagnosticScenario: Option[String] = None)
+      diagnosticScenario: Option[String] = None,
+      verifierRoute: String = NoProbeVerifierRoute,
+      pairedAllocation: Boolean = false)
 
   final case class ResourceMetadata(
       id: String,
@@ -162,6 +166,9 @@ private[benchmark] object Eip0045BenchmarkSupport {
       |                      Public manifest run ID; requires --campaign-manifest
       |  --diagnostic-scenario ID
       |                      Measure one named scenario; incompatible with campaign mode
+      |  --verifier-route ROUTE
+      |                      Diagnostic verifier route: no-probe (default) or operation-only
+      |  --paired-allocation Run the route-exact preflight and allocation-count gate
       |  --help              Show this help
       |""".stripMargin
 
@@ -176,6 +183,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
     var campaignManifestPath: Option[String] = None
     var campaignRunId: Option[String] = None
     var diagnosticScenario: Option[String] = None
+    var verifierRoute = NoProbeVerifierRoute
+    var pairedAllocation = false
     var seenWarmup = false
     var seenSamples = false
     var seenOutput = false
@@ -184,6 +193,8 @@ private[benchmark] object Eip0045BenchmarkSupport {
     var seenCampaignManifest = false
     var seenCampaignRunId = false
     var seenDiagnosticScenario = false
+    var seenVerifierRoute = false
+    var seenPairedAllocation = false
     var i = 0
     while (i < args.length) {
       val option = args(i)
@@ -289,6 +300,28 @@ private[benchmark] object Eip0045BenchmarkSupport {
           diagnosticScenario = Some(value)
           seenDiagnosticScenario = true
           i += 2
+        case "--verifier-route" =>
+          if (seenVerifierRoute)
+            return Left("duplicate option --verifier-route")
+          val value = nextValue(args, i, option) match {
+            case Right(v) => v
+            case Left(e)  => return Left(e)
+          }
+          value match {
+            case NoProbeVerifierRoute | OperationOnlyVerifierRoute =>
+              verifierRoute = value
+            case _ =>
+              return Left(
+                "--verifier-route must be no-probe or operation-only")
+          }
+          seenVerifierRoute = true
+          i += 2
+        case "--paired-allocation" =>
+          if (seenPairedAllocation)
+            return Left("duplicate option --paired-allocation")
+          pairedAllocation = true
+          seenPairedAllocation = true
+          i += 1
         case "--help" =>
           return Left("--help must be handled before argument parsing")
         case _ =>
@@ -298,6 +331,11 @@ private[benchmark] object Eip0045BenchmarkSupport {
     if (diagnosticScenario.isDefined &&
         (campaignManifestPath.isDefined || campaignRunId.isDefined))
       return Left("--diagnostic-scenario cannot be combined with campaign options")
+    if (verifierRoute == OperationOnlyVerifierRoute && diagnosticScenario.isEmpty)
+      return Left(
+        "--verifier-route operation-only requires --diagnostic-scenario")
+    if (pairedAllocation && diagnosticScenario.isEmpty)
+      return Left("--paired-allocation requires --diagnostic-scenario")
     if (campaignManifestPath.isDefined != campaignRunId.isDefined)
       return Left("--campaign-manifest and --campaign-run-id must be supplied together")
     if (campaignManifestPath.isDefined && implementationRevision == "unrecorded")
@@ -312,7 +350,9 @@ private[benchmark] object Eip0045BenchmarkSupport {
       implementationRevision,
       campaignManifestPath,
       campaignRunId,
-      diagnosticScenario))
+      diagnosticScenario,
+      verifierRoute,
+      pairedAllocation))
   }
 
   private def nextValue(
@@ -815,7 +855,14 @@ private[benchmark] object Eip0045BenchmarkSupport {
     out.append(',')
     field(out, "percentileMethod", "nearest-rank")
     out.append(',')
-    field(out, "timedScope", "Risc0RawSealVerifier.verify; fixture and profile loading excluded")
+    field(
+      out,
+      "timedScope",
+      if (payload.verifierEntryPoint ==
+          "sigma.stark.profile.Risc0RawSealVerifier.verifyObservedOperations")
+        "Risc0RawSealVerifier.verifyObservedOperations; fixture and profile loading excluded"
+      else
+        "Risc0RawSealVerifier.verify; fixture and profile loading excluded")
     out.append(',')
     field(out, "allocationScope", "current benchmark thread around each timed verifier invocation")
     out.append(',')

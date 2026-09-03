@@ -412,7 +412,7 @@
     },
     {
       "path": "core/shared/src/main/scala/sigma/stark/profile/Risc0RawSealVerifier.scala",
-      "sha256": "23fb188445c7719aac00a706b07293c735dbd4a3e5956ce5ea95de82e85e712d",
+      "sha256": "9856da40ff0dcdf760ad19dfd01064df79da10a5bf588b6b0b7f5bce143d90a6",
       "provenance": "substantially-adapted",
       "sources": [
         "arkadia:SuccinctVerifier",
